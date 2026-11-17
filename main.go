@@ -5,15 +5,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -47,26 +51,62 @@ const (
 	udpIdleTimeout = 2 * time.Minute
 	maxMessageSize = 256 * 1024
 	bufferSize     = 32 * 1024
+
+	// 从主控拉取设备的间隔.
+	nodeSyncInterval = 60 * time.Second
 )
 
-// server 持有只读的用户表与 WS 配置, 可被多个连接并发使用.
+// server 持有可热更新的用户表与 WS 配置, 可被多个连接并发使用.
 type server struct {
-	users    map[[16]byte]struct{}
-	path     string // 为空表示任意路径都接受
-	upgrader websocket.Upgrader
-	active   atomic.Int64
+	users     atomic.Pointer[map[[16]byte]struct{}]
+	path      string // 为空表示任意路径都接受
+	upgrader  websocket.Upgrader
+	active    atomic.Int64
+	startedAt time.Time
+}
+
+type healthResponse struct {
+	OK            bool   `json:"ok"`
+	Uptime        string `json:"uptime"`
+	UptimeSeconds int64  `json:"uptimeSeconds"`
 }
 
 func newServer(users map[[16]byte]struct{}, path string) *server {
-	return &server{
-		users: users,
-		path:  path,
+	s := &server{
+		path:      path,
+		startedAt: time.Now(),
 		upgrader: websocket.Upgrader{
 			CheckOrigin:     func(*http.Request) bool { return true },
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
 		},
 	}
+	s.setUsers(users)
+	return s
+}
+
+func (s *server) setUsers(users map[[16]byte]struct{}) {
+	if users == nil {
+		users = map[[16]byte]struct{}{}
+	}
+	s.users.Store(&users)
+}
+
+func (s *server) hasUser(id [16]byte) bool {
+	users := s.users.Load()
+	if users == nil {
+		return false
+	}
+	_, ok := (*users)[id]
+	return ok
+}
+
+func (s *server) userCount() int {
+	users := s.users.Load()
+	if users == nil {
+		return 0
+	}
+	return len(*users)
 }
 
 func main() {
@@ -78,14 +118,20 @@ func main() {
 	listen := flag.String("listen", defaultListen, "HTTP listen address")
 	uuidList := flag.String("uuid", os.Getenv("UUID"), "comma-separated VLESS UUIDs")
 	path := flag.String("path", os.Getenv("WS_PATH"), "WebSocket path to accept (empty = any)")
+	config := flag.String("config", os.Getenv("CONFIG"), "control plane: <baseURL>_<name>_<token>")
 	flag.Parse()
+
+	nodeCfg, err := parseNodeConfig(*config)
+	if err != nil {
+		log.Fatalf("invalid CONFIG: %v", err)
+	}
 
 	users, err := parseUsers(*uuidList)
 	if err != nil {
 		log.Fatalf("invalid users: %v", err)
 	}
-	if len(users) == 0 {
-		log.Fatal("missing -uuid (or UUID env)")
+	if len(users) == 0 && nodeCfg.baseURL == "" {
+		log.Fatal("missing -uuid (or UUID env) or -config (or CONFIG env)")
 	}
 
 	wsPath := strings.TrimSpace(*path)
@@ -94,6 +140,24 @@ func main() {
 	}
 
 	srv := newServer(users, wsPath)
+	if nodeCfg.baseURL != "" {
+		info := collectNodeInfo()
+		log.Printf(
+			"node info runtime=%s hosts=%v ipv4=%s ipv6=%s country=%s",
+			info.runtime, info.hosts, info.ipv4, info.ipv6, info.countryCode,
+		)
+		if err := syncDevices(nodeCfg, srv, *listen, wsPath, users, info); err != nil {
+			log.Printf("initial device sync failed: %v", err)
+		}
+
+		// Vercel / Railway 无请求时会自动休眠；后台定时同步会产生持续请求，
+		// 让实例无法休眠。这两个平台只在冷启动时同步一次。
+		if isAutoSleepRuntime(info.runtime) {
+			log.Printf("runtime %s: background sync disabled (auto-sleep)", info.runtime)
+		} else {
+			go syncLoop(nodeCfg, srv, *listen, wsPath, users, info)
+		}
+	}
 	httpServer := &http.Server{
 		Addr:              *listen,
 		Handler:           http.HandlerFunc(srv.handleWS),
@@ -118,7 +182,7 @@ func main() {
 	if displayPath == "" {
 		displayPath = "*"
 	}
-	log.Printf("vless-ws listening on %s (path=%s, users=%d)", *listen, displayPath, len(users))
+	log.Printf("vless-ws listening on %s (path=%s, users=%d)", *listen, displayPath, srv.userCount())
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
@@ -139,6 +203,28 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer s.active.Add(-1)
 
 	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		// 浏览器/探活请求走普通 HTTP：根路径和 /healthz 返回健康信息，
+		// 避免直接看到 426/400；真正的 WebSocket 路径仍要求 Upgrade。
+		if r.Method == http.MethodGet && r.URL.Path == "/healthz" {
+			uptime := time.Since(s.startedAt)
+
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			_ = json.NewEncoder(w).Encode(healthResponse{
+				OK:            true,
+				Uptime:        uptime.Truncate(time.Second).String(),
+				UptimeSeconds: int64(uptime.Seconds()),
+			})
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/" {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("vless-small ok\n"))
+			return
+		}
+
 		http.Error(w, "websocket upgrade required", http.StatusUpgradeRequired)
 		return
 	}
@@ -169,7 +255,7 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 		log.Printf("bad request %s: %v", r.RemoteAddr, err)
 		return
 	}
-	if _, ok := s.users[id]; !ok {
+	if !s.hasUser(id) {
 		log.Printf("reject %s: unknown UUID", r.RemoteAddr)
 		return
 	}
@@ -426,6 +512,425 @@ func parseRequest(b []byte) (id [16]byte, cmd byte, target string, payload []byt
 	target = net.JoinHostPort(host, strconv.Itoa(int(port)))
 	payload = b[off:]
 	return
+}
+
+// nodeConfig 是 CONFIG=<baseURL>_<name>_<token> 的解析结果.
+// name 与 token 中不要包含下划线.
+type nodeConfig struct {
+	baseURL string
+	name    string
+	token   string
+}
+
+func parseNodeConfig(raw string) (nodeConfig, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nodeConfig{}, nil
+	}
+
+	last := strings.LastIndex(raw, "_")
+	if last < 0 {
+		return nodeConfig{}, fmt.Errorf("expected <baseURL>_<name>_<token>")
+	}
+	token := strings.TrimSpace(raw[last+1:])
+	rest := raw[:last]
+
+	sep := strings.LastIndex(rest, "_")
+	if sep < 0 {
+		return nodeConfig{}, fmt.Errorf("expected <baseURL>_<name>_<token>")
+	}
+	name := strings.TrimSpace(rest[sep+1:])
+	baseURL := strings.TrimRight(strings.TrimSpace(rest[:sep]), "/")
+
+	if baseURL == "" || name == "" || token == "" {
+		return nodeConfig{}, fmt.Errorf("CONFIG requires baseURL, name and token")
+	}
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		return nodeConfig{}, fmt.Errorf("baseURL must start with http:// or https://")
+	}
+
+	return nodeConfig{baseURL: baseURL, name: name, token: token}, nil
+}
+
+type nodeDevice struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+}
+
+type nodeReportResponse struct {
+	Devices []nodeDevice `json:"devices"`
+}
+
+var syncHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
+type nodeInfo struct {
+	runtime     string
+	hosts       []string
+	ipv4        string
+	ipv6        string
+	countryCode string
+	latitude    *float64
+	longitude   *float64
+}
+
+type nodeReport struct {
+	Name        string   `json:"name"`
+	Runtime     string   `json:"runtime"`
+	Listen      string   `json:"listen,omitempty"`
+	Path        string   `json:"path,omitempty"`
+	Hosts       []string `json:"hosts,omitempty"`
+	IPv4        string   `json:"ipv4,omitempty"`
+	IPv6        string   `json:"ipv6,omitempty"`
+	CountryCode string   `json:"countryCode,omitempty"`
+	Latitude    *float64 `json:"latitude,omitempty"`
+	Longitude   *float64 `json:"longitude,omitempty"`
+}
+
+// collectNodeInfo 汇总平台信息与本机公网 IP/地理位置.
+func collectNodeInfo() nodeInfo {
+	info := nodeInfo{
+		runtime: detectRuntime(),
+		hosts:   detectHosts(),
+	}
+
+	found, err := lookupIPInfo()
+	if err != nil {
+		log.Printf("ip lookup failed: %v", err)
+	} else {
+		info.ipv4 = found.ipv4
+		info.ipv6 = found.ipv6
+		info.countryCode = found.countryCode
+		info.latitude = found.latitude
+		info.longitude = found.longitude
+	}
+
+	if v := strings.TrimSpace(os.Getenv("NODE_IPV4")); v != "" {
+		info.ipv4 = v
+	}
+	if v := strings.TrimSpace(os.Getenv("NODE_IPV6")); v != "" {
+		info.ipv6 = v
+	}
+	return info
+}
+
+// detectRuntime 通过环境变量判断当前 SaaS 平台.
+func detectRuntime() string {
+	if v := firstNonEmpty(os.Getenv("NODE_RUNTIME"), os.Getenv("RUNTIME")); v != "" {
+		return v
+	}
+
+	switch {
+	case envSet("VERCEL") || envSet("VERCEL_URL"):
+		return "vercel"
+	case envSet("RAILWAY_ENVIRONMENT") || envSet("RAILWAY_PUBLIC_DOMAIN"):
+		return "railway"
+	case envSet("RENDER") || envSet("RENDER_EXTERNAL_URL"):
+		return "render"
+	case envSet("FLY_APP_NAME"):
+		return "fly"
+	case envSet("KOYEB_APP_NAME") || envSet("KOYEB_PUBLIC_DOMAIN"):
+		return "koyeb"
+	case envSet("CF_PAGES") || envSet("CF_PAGES_URL"):
+		return "cloudflare"
+	case envSet("ZEABUR") || envSet("ZEABUR_WEB_URL"):
+		return "zeabur"
+	case envSet("NORTHFLANK") || envPrefixSet("NORTHFLANK_"):
+		return "northflank"
+	default:
+		return "local"
+	}
+}
+
+func envSet(key string) bool {
+	return strings.TrimSpace(os.Getenv(key)) != ""
+}
+
+// envPrefixSet 检查是否存在以 prefix 开头的环境变量。
+// Northflank 没有固定的运行 URL 变量，但会/可以由用户注入 NORTHFLANK_* 变量。
+func envPrefixSet(prefix string) bool {
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// isAutoSleepRuntime 判断平台是否会在没有请求时自动休眠。
+// 这类平台不能跑后台轮询，否则持续请求会阻止实例休眠。
+// Northflank 可以常驻，因此保持后台同步。
+func isAutoSleepRuntime(runtime string) bool {
+	return runtime == "vercel" || runtime == "railway"
+}
+
+// detectHosts 获取平台分配的公网地址.
+func detectHosts() []string {
+	if raw := os.Getenv("PUBLIC_HOSTS"); strings.TrimSpace(raw) != "" {
+		return normalizeHosts(strings.Split(raw, ","))
+	}
+	if raw := os.Getenv("PUBLIC_HOST"); strings.TrimSpace(raw) != "" {
+		return normalizeHosts([]string{raw})
+	}
+
+	// 只使用稳定的公网地址：
+	// - 不用 VERCEL_URL：它是每次部署都会变化的 deployment URL；
+	// - 不用 CF_PAGES_URL：它同样指向单次部署，不是稳定生产域名。
+	candidates := []string{
+		os.Getenv("VERCEL_PROJECT_PRODUCTION_URL"),
+		os.Getenv("RAILWAY_PUBLIC_DOMAIN"),
+		os.Getenv("RENDER_EXTERNAL_HOSTNAME"),
+		os.Getenv("RENDER_EXTERNAL_URL"),
+		os.Getenv("KOYEB_PUBLIC_DOMAIN"),
+		os.Getenv("ZEABUR_WEB_URL"),
+		// Northflank 不注入自身 .code.run URL，通常由部署者手动设置这些变量。
+		os.Getenv("NORTHFLANK_PUBLIC_URL"),
+		os.Getenv("NORTHFLANK_SERVICE_URL"),
+		os.Getenv("NORTHFLANK_URL"),
+		os.Getenv("NORTHFLANK_HOST"),
+		os.Getenv("NORTHFLANK_PUBLIC_HOST"),
+		os.Getenv("NORTHFLANK_SERVICE_HOST"),
+		os.Getenv("NORTHFLANK_DOMAIN"),
+		os.Getenv("NORTHFLANK_SERVICE_DOMAIN"),
+		os.Getenv("SERVICE_URL"),
+		os.Getenv("PUBLIC_URL"),
+	}
+	if app := strings.TrimSpace(os.Getenv("FLY_APP_NAME")); app != "" {
+		candidates = append(candidates, app+".fly.dev")
+	}
+	return normalizeHosts(candidates)
+}
+
+func normalizeHosts(raw []string) []string {
+	seen := make(map[string]struct{}, len(raw))
+	hosts := make([]string, 0, len(raw))
+
+	for _, item := range raw {
+		host := normalizeHost(item)
+		if host == "" {
+			continue
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		hosts = append(hosts, host)
+	}
+	return hosts
+}
+
+func normalizeHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(u.Host)
+	}
+	if i := strings.IndexAny(raw, "/?#"); i >= 0 {
+		raw = raw[:i]
+	}
+	return strings.TrimSpace(raw)
+}
+
+type ipLookupResponse struct {
+	IP          string   `json:"ip"`
+	IPv4        string   `json:"ipv4"`
+	IPv6        string   `json:"ipv6"`
+	Type        string   `json:"type"`
+	Country     string   `json:"country"`
+	CountryCode string   `json:"country_code"`
+	Loc         string   `json:"loc"`
+	Latitude    *float64 `json:"latitude"`
+	Longitude   *float64 `json:"longitude"`
+	Success     *bool    `json:"success"`
+}
+
+func lookupIPInfo() (nodeInfo, error) {
+	endpoint := strings.TrimSpace(os.Getenv("IP_LOOKUP_URL"))
+	if endpoint == "" {
+		endpoint = "https://ipinfo.io/json"
+	}
+
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nodeInfo{}, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "vless-small")
+
+	resp, err := syncHTTPClient.Do(req)
+	if err != nil {
+		return nodeInfo{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nodeInfo{}, fmt.Errorf("lookup %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var data ipLookupResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&data); err != nil {
+		return nodeInfo{}, fmt.Errorf("decode lookup: %w", err)
+	}
+	if data.Success != nil && !*data.Success {
+		return nodeInfo{}, fmt.Errorf("lookup returned success=false")
+	}
+
+	info := nodeInfo{
+		ipv4:        strings.TrimSpace(data.IPv4),
+		ipv6:        strings.TrimSpace(data.IPv6),
+		countryCode: strings.ToUpper(firstNonEmpty(data.CountryCode, data.Country)),
+		latitude:    data.Latitude,
+		longitude:   data.Longitude,
+	}
+
+	ip := strings.TrimSpace(data.IP)
+	if ip != "" {
+		parsed := net.ParseIP(ip)
+		switch {
+		case parsed == nil:
+		case parsed.To4() != nil:
+			if info.ipv4 == "" {
+				info.ipv4 = ip
+			}
+		default:
+			if info.ipv6 == "" {
+				info.ipv6 = ip
+			}
+		}
+	}
+	if strings.EqualFold(data.Type, "ipv4") && info.ipv4 == "" {
+		info.ipv4 = ip
+	}
+	if strings.EqualFold(data.Type, "ipv6") && info.ipv6 == "" {
+		info.ipv6 = ip
+	}
+
+	if info.latitude == nil || info.longitude == nil {
+		if lat, lon, ok := parseLoc(data.Loc); ok {
+			info.latitude, info.longitude = &lat, &lon
+		}
+	}
+	return info, nil
+}
+
+func parseLoc(raw string) (float64, float64, bool) {
+	parts := strings.Split(raw, ",")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	lat, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	lon, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	if lat < -90 || lat > 90 || lon < -180 || lon > 180 {
+		return 0, 0, false
+	}
+	return lat, lon, true
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func syncLoop(
+	cfg nodeConfig,
+	srv *server,
+	listen, path string,
+	static map[[16]byte]struct{},
+	info nodeInfo,
+) {
+	ticker := time.NewTicker(nodeSyncInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		if err := syncDevices(cfg, srv, listen, path, static, info); err != nil {
+			log.Printf("device sync failed: %v", err)
+		}
+	}
+}
+
+// syncDevices 向主控上报节点信息, 并把返回的所有启用设备设为可认证 UUID.
+func syncDevices(
+	cfg nodeConfig,
+	srv *server,
+	listen, path string,
+	static map[[16]byte]struct{},
+	info nodeInfo,
+) error {
+	payload, err := json.Marshal(nodeReport{
+		Name:        cfg.name,
+		Runtime:     info.runtime,
+		Listen:      listen,
+		Path:        path,
+		Hosts:       info.hosts,
+		IPv4:        info.ipv4,
+		IPv6:        info.ipv6,
+		CountryCode: info.countryCode,
+		Latitude:    info.latitude,
+		Longitude:   info.longitude,
+	})
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, cfg.baseURL+"/api/nodes/report", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+cfg.token)
+
+	resp, err := syncHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("report %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+
+	var result nodeReportResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+
+	users := make(map[[16]byte]struct{}, len(static)+len(result.Devices))
+	for id := range static {
+		users[id] = struct{}{}
+	}
+	for _, device := range result.Devices {
+		if !device.Enabled {
+			continue
+		}
+		id, err := parseUUID(device.ID)
+		if err != nil {
+			log.Printf("skip device %q: %v", device.Name, err)
+			continue
+		}
+		users[id] = struct{}{}
+	}
+
+	srv.setUsers(users)
+	log.Printf("synced %d devices from %s", len(users), cfg.baseURL)
+	return nil
 }
 
 // parseUsers 解析逗号分隔的 UUID 列表.

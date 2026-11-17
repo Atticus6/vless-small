@@ -8,7 +8,11 @@
 ## 运行
 
 ```bash
+# 手动 UUID
 UUID=14725836-1234-5678-9abc-def012345678 go run .
+
+# 从主控同步设备（CONFIG = <baseURL>_<name>_<token>）
+CONFIG=https://dsh.atticus.eu.org_hk_<token> go run .
 
 # 等价写法
 go run . -uuid 14725836-1234-5678-9abc-def012345678 -listen :8080 -path /ws
@@ -17,18 +21,59 @@ go run . -uuid 14725836-1234-5678-9abc-def012345678 -listen :8080 -path /ws
 | 参数 / 环境变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `-listen` / `PORT` | `:8080` | 监听地址；`PORT=9000` 时监听 `:9000` |
-| `-uuid` / `UUID` | — | 必填，多个用户用逗号分隔 |
+| `-uuid` / `UUID` | — | 逗号分隔的静态 UUID；设置 `CONFIG` 时可选 |
 | `-path` / `WS_PATH` | 空（任意路径） | 只接受指定 WS 路径，如 `/ws` |
+| `-config` / `CONFIG` | — | `<baseURL>_<name>_<token>`，用于向主控上报并同步设备 |
+
+## HTTP 健康检查
+
+- `GET /` 返回 `vless-small ok`
+- `GET /healthz` 返回实例存活时间：
+
+```json
+{"ok":true,"uptime":"1m23s","uptimeSeconds":83}
+```
+
+- WebSocket 路径（`WS_PATH`）仍要求 `Upgrade: websocket`，普通 HTTP 请求返回 426
+
+## 主控同步
+
+设置 `CONFIG` 后，节点启动时和每 60 秒会：
+
+1. 向 `<baseURL>/api/nodes/report` 上报节点信息；
+2. 使用 `Bearer <token>` 认证（`name` + `token` 必须与主控 `vless` 表中的记录一致）；
+3. 接收主控返回的所有设备，把启用设备的 `id` 当作 VLESS UUID 接受连接。
+
+节点信息由 vless-small 自动收集：
+
+| 字段 | 来源 |
+| --- | --- |
+| `runtime` | `NODE_RUNTIME` / `RUNTIME`，否则根据 `VERCEL`、`RAILWAY_*`、`RENDER_*`、`FLY_APP_NAME`、`KOYEB_*`、`CF_PAGES*`、`ZEABUR*`、`NORTHFLANK_*` 自动判断 |
+| `hosts` | `PUBLIC_HOSTS`（逗号分隔）/ `PUBLIC_HOST`，否则读取平台分配的公网域名；Northflank 可用 `NORTHFLANK_PUBLIC_URL` / `NORTHFLANK_HOST` 等 |
+
+只采集稳定的公网地址：Vercel 使用 `VERCEL_PROJECT_PRODUCTION_URL`（忽略每次部署变化的 `VERCEL_URL`）；
+Cloudflare Pages 不使用 `CF_PAGES_URL`（单次部署地址），请通过 `PUBLIC_HOST` 手动指定生产域名。
+| `ipv4` / `ipv6` | 本机公网 IP 查询；可用 `NODE_IPV4` / `NODE_IPV6` 覆盖 |
+| `countryCode` / `latitude` / `longitude` | 本机 IP 查询结果 |
+
+IP 查询默认请求 `https://ipinfo.io/json`，可用 `IP_LOOKUP_URL` 指向其他服务。
+`name` 和 `token` 中不要包含下划线（`CONFIG` 使用下划线分隔）。
+
+在 **Vercel / Railway** 上不会启动 60 秒后台同步，只在冷启动时同步一次，
+避免空闲时持续请求让实例无法自动休眠。其他运行环境（包括 Northflank）仍按 60 秒刷新设备列表。
+
+Northflank 不会自动注入自身的 `*.code.run` 公网地址；部署时请把地址写入
+`NORTHFLANK_PUBLIC_URL`、`NORTHFLANK_HOST` 或通用的 `PUBLIC_HOST` / `PUBLIC_HOSTS`。
 
 ## 客户端
 
 明文 WebSocket（或由 Nginx / Cloudflare 终止 TLS 后转发到本服务）：
 
 ```
-vless://<UUID>@<HOST>:<PORT>?encryption=none&security=none&type=ws&path=%2Fws#vless-small
+vless://<DEVICE_ID>@<HOST>:<PORT>?encryption=none&security=none&type=ws&path=%2Fws#vless-small
 ```
 
-走 TLS/WSS 时把 `security` 改成 `tls`，端口换成 443。
+`DEVICE_ID` 是主控中设备记录的 `id`（UUID）。走 TLS/WSS 时把 `security` 改成 `tls`，端口换成 443。
 
 ## 说明
 

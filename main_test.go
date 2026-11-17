@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -403,5 +404,262 @@ func TestPathMismatch(t *testing.T) {
 	}
 	if resp == nil || resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %v, want 404", resp)
+	}
+}
+
+func TestParseNodeConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    nodeConfig
+		wantErr bool
+	}{
+		{name: "empty", raw: ""},
+		{
+			name: "valid",
+			raw:  "https://dsh.atticus.eu.org_hk_abc123",
+			want: nodeConfig{baseURL: "https://dsh.atticus.eu.org", name: "hk", token: "abc123"},
+		},
+		{name: "missing token", raw: "https://dsh.atticus.eu.org_hk", wantErr: true},
+		{name: "bad scheme", raw: "ftp://dsh.atticus.eu.org_hk_abc123", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseNodeConfig(tt.raw)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseNodeConfig: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("got %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSyncDevices(t *testing.T) {
+	enabledID := mustTestUUID(t)
+	disabledID, err := parseUUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+	if err != nil {
+		t.Fatal(err)
+	}
+	staticID, err := parseUUID("11111111-2222-3333-4444-555555555555")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var gotAuth string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/nodes/report" {
+			http.NotFound(w, r)
+			return
+		}
+		gotAuth = r.Header.Get("Authorization")
+
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode report: %v", err)
+			return
+		}
+		if body["name"] != "hk" || body["runtime"] != "vless-small" {
+			t.Errorf("report body = %#v", body)
+		}
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"devices": []map[string]any{
+				{"id": testUUID, "name": "phone", "enabled": true},
+				{"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "name": "disabled", "enabled": false},
+			},
+		})
+	}))
+	defer ts.Close()
+
+	srv := newServer(nil, "")
+	cfg := nodeConfig{baseURL: ts.URL, name: "hk", token: "secret"}
+	static := map[[16]byte]struct{}{staticID: {}}
+
+	if err := syncDevices(cfg, srv, ":8080", "/ws", static, nodeInfo{runtime: "vless-small"}); err != nil {
+		t.Fatalf("syncDevices: %v", err)
+	}
+	if gotAuth != "Bearer secret" {
+		t.Fatalf("authorization = %q", gotAuth)
+	}
+	if !srv.hasUser(enabledID) {
+		t.Fatal("enabled device missing")
+	}
+	if !srv.hasUser(staticID) {
+		t.Fatal("static UUID missing")
+	}
+	if srv.hasUser(disabledID) {
+		t.Fatal("disabled device should be skipped")
+	}
+	if srv.userCount() != 2 {
+		t.Fatalf("userCount = %d, want 2", srv.userCount())
+	}
+}
+
+func TestDetectRuntimeAndHosts(t *testing.T) {
+	for _, key := range []string{
+		"NODE_RUNTIME", "RUNTIME",
+		"PUBLIC_HOST", "PUBLIC_HOSTS",
+		"VERCEL", "VERCEL_URL", "VERCEL_PROJECT_PRODUCTION_URL",
+		"RAILWAY_ENVIRONMENT", "RAILWAY_PUBLIC_DOMAIN",
+		"RENDER", "RENDER_EXTERNAL_URL", "RENDER_EXTERNAL_HOSTNAME",
+		"FLY_APP_NAME",
+		"KOYEB_APP_NAME", "KOYEB_PUBLIC_DOMAIN",
+		"CF_PAGES", "CF_PAGES_URL",
+		"ZEABUR", "ZEABUR_WEB_URL",
+		"NORTHFLANK", "NORTHFLANK_SERVICE_ID", "NORTHFLANK_PROJECT_ID",
+		"NORTHFLANK_PUBLIC_URL", "NORTHFLANK_SERVICE_URL", "SERVICE_URL",
+	} {
+		t.Setenv(key, "")
+	}
+
+	t.Setenv("VERCEL", "1")
+	t.Setenv("VERCEL_PROJECT_PRODUCTION_URL", "demo.vercel.app")
+	// 每次部署变化的 VERCEL_URL 不应被当作稳定公网地址。
+	t.Setenv("VERCEL_URL", "preview-abc.vercel.app")
+
+	if got := detectRuntime(); got != "vercel" {
+		t.Fatalf("runtime = %q, want vercel", got)
+	}
+	hosts := detectHosts()
+	if len(hosts) != 1 || hosts[0] != "demo.vercel.app" {
+		t.Fatalf("hosts = %v, want [demo.vercel.app]", hosts)
+	}
+}
+
+func TestDetectNorthflank(t *testing.T) {
+	for _, key := range []string{
+		"NODE_RUNTIME", "RUNTIME",
+		"PUBLIC_HOST", "PUBLIC_HOSTS",
+		"VERCEL", "VERCEL_URL", "VERCEL_PROJECT_PRODUCTION_URL",
+		"RAILWAY_ENVIRONMENT", "RAILWAY_PUBLIC_DOMAIN",
+		"RENDER", "RENDER_EXTERNAL_URL", "RENDER_EXTERNAL_HOSTNAME",
+		"FLY_APP_NAME",
+		"KOYEB_APP_NAME", "KOYEB_PUBLIC_DOMAIN",
+		"CF_PAGES", "CF_PAGES_URL",
+		"ZEABUR", "ZEABUR_WEB_URL",
+		"NORTHFLANK", "NORTHFLANK_PUBLIC_URL", "NORTHFLANK_SERVICE_URL",
+		"NORTHFLANK_URL", "NORTHFLANK_HOST", "NORTHFLANK_PUBLIC_HOST",
+		"NORTHFLANK_SERVICE_HOST", "NORTHFLANK_DOMAIN", "NORTHFLANK_SERVICE_DOMAIN",
+		"SERVICE_URL", "PUBLIC_URL",
+	} {
+		t.Setenv(key, "")
+	}
+
+	t.Setenv("NORTHFLANK_SERVICE_ID", "svc-123")
+	t.Setenv("NORTHFLANK_HOST", "https://p01--vless--abc.code.run")
+
+	if got := detectRuntime(); got != "northflank" {
+		t.Fatalf("runtime = %q, want northflank", got)
+	}
+	hosts := detectHosts()
+	if len(hosts) != 1 || hosts[0] != "p01--vless--abc.code.run" {
+		t.Fatalf("hosts = %v, want [p01--vless--abc.code.run]", hosts)
+	}
+}
+
+func TestIsAutoSleepRuntime(t *testing.T) {
+	for _, runtime := range []string{"vercel", "railway"} {
+		if !isAutoSleepRuntime(runtime) {
+			t.Fatalf("%s should disable background sync", runtime)
+		}
+	}
+	for _, runtime := range []string{"local", "render", "fly", "koyeb", "cloudflare", "zeabur", "northflank"} {
+		if isAutoSleepRuntime(runtime) {
+			t.Fatalf("%s should keep background sync", runtime)
+		}
+	}
+}
+
+func TestLookupIPInfo(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ip":      "1.2.3.4",
+			"country": "HK",
+			"loc":     "22.3,114.2",
+		})
+	}))
+	defer ts.Close()
+
+	t.Setenv("IP_LOOKUP_URL", ts.URL)
+
+	info, err := lookupIPInfo()
+	if err != nil {
+		t.Fatalf("lookupIPInfo: %v", err)
+	}
+	if info.ipv4 != "1.2.3.4" {
+		t.Fatalf("ipv4 = %q", info.ipv4)
+	}
+	if info.countryCode != "HK" {
+		t.Fatalf("countryCode = %q", info.countryCode)
+	}
+	if info.latitude == nil || info.longitude == nil {
+		t.Fatal("latitude/longitude missing")
+	}
+	if *info.latitude != 22.3 || *info.longitude != 114.2 {
+		t.Fatalf("loc = %v,%v", *info.latitude, *info.longitude)
+	}
+}
+
+func TestHealthEndpoints(t *testing.T) {
+	ts := newTestWSServer(t, nil, "/ws")
+
+	rootResp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	rootBody, err := io.ReadAll(rootResp.Body)
+	rootResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read /: %v", err)
+	}
+	if rootResp.StatusCode != http.StatusOK {
+		t.Fatalf("/ status = %d, want 200", rootResp.StatusCode)
+	}
+	if string(rootBody) != "vless-small ok\n" {
+		t.Fatalf("/ body = %q", rootBody)
+	}
+
+	healthResp, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	defer healthResp.Body.Close()
+	if healthResp.StatusCode != http.StatusOK {
+		t.Fatalf("/healthz status = %d, want 200", healthResp.StatusCode)
+	}
+	if !strings.Contains(healthResp.Header.Get("Content-Type"), "application/json") {
+		t.Fatalf("/healthz content-type = %q", healthResp.Header.Get("Content-Type"))
+	}
+
+	var health healthResponse
+	if err := json.NewDecoder(healthResp.Body).Decode(&health); err != nil {
+		t.Fatalf("decode /healthz: %v", err)
+	}
+	if !health.OK {
+		t.Fatal("/healthz ok = false")
+	}
+	if health.Uptime == "" {
+		t.Fatal("/healthz uptime is empty")
+	}
+	if health.UptimeSeconds < 0 {
+		t.Fatalf("/healthz uptimeSeconds = %d", health.UptimeSeconds)
+	}
+
+	wsResp, err := http.Get(ts.URL + "/ws")
+	if err != nil {
+		t.Fatalf("GET /ws: %v", err)
+	}
+	defer wsResp.Body.Close()
+	if wsResp.StatusCode != http.StatusUpgradeRequired {
+		t.Fatalf("/ws status = %d, want 426", wsResp.StatusCode)
 	}
 }
