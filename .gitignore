@@ -1,4 +1,6 @@
 /vless-small
 /vless-small.exe
+/netlify/server/vless-small
+/netlify/server/vless-small.exe
 .vercel
 .env*

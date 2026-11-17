@@ -67,8 +67,29 @@ Functions 上也不可用。Serverless 平台请使用 packet-up 的 XHTTP 节�
 GET 需要持续流式响应：Vercel 已验证可用；Netlify 的 Go 运行时响应流式能力有限，
 部署前需确认，必要时改用 Netlify Server + Node 代理。
 
-Xray 客户端示例（`network` 用 `xhttp` 或旧名 `splithttp`）：
+## Netlify 部署（实验性）
 
+Netlify Functions 的 Go 运行时无法承载 WebSocket，也没有 XHTTP 需要的流式请求体，
+因此仓库使用 **Netlify Server（Node.js，Early Access）** 包一层：
+
+- `netlify.toml` 在构建阶段生成 `netlify/server/vless-small`
+- `netlify/server/index.mjs` 启动 Go 子进程，并把 HTTP 请求与 WebSocket upgrade
+  原样转发到 `127.0.0.1`
+- 运行时把二进制复制到 `/tmp` 并 `chmod +x`，避免只读目录和可执行位问题
+- `CONFIG` / `UUID` / `XHTTP_PATH` 等环境变量会透传给 Go 子进程
+
+本地验证（Windows 下用 `-o netlify/server/vless-small.exe`）：
+
+```bash
+go build -o netlify/server/vless-small .
+PORT=18090 UUID=<uuid> node netlify/server/index.mjs
+curl http://127.0.0.1:18090/healthz
+```
+
+注意：Netlify Server 仍是 Early Access，`child_process` 不是其文档明确支持的能力；
+部署前请在 preview 环境验证。Netlify Functions 方式无法运行本服务。
+
+Xray 客户端示例（`network` 用 `xhttp` 或旧名 `splithttp`）：
 ```json
 {
   "network": "xhttp",

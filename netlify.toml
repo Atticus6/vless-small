@@ -1,0 +1,13 @@
+[build]
+  # 构建 Linux Go 二进制；Netlify Server 入口会在运行时启动它。
+  command = 'CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o netlify/server/vless-small .'
+  publish = "public"
+
+[build.environment]
+  GO_VERSION = "1.26.7"
+  # 构建镜像自带 Go 版本较旧时，允许自动下载 go.mod 要求的工具链。
+  GOTOOLCHAIN = "auto"
+
+[server]
+  # 把 Go 二进制一起打进 Netlify Server 的 bundle。
+  includedFiles = ["netlify/server/vless-small"]
