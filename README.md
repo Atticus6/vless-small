@@ -63,7 +63,9 @@ CONFIG=... go run .
 并同步修改主控的节点路径（当前订阅固定为 `/xhttp`）。
 
 Vercel / Netlify Functions 会缓冲完整请求体，不能使用 stream-one；WebSocket 在 Netlify
-Functions 上也不可用。Serverless 平台请使用 packet-up 的 XHTTP 节点。
+Functions 上也不可用。Serverless 平台请使用 packet-up 的 XHTTP 节点。packet-up 的下载
+GET 需要持续流式响应：Vercel 已验证可用；Netlify 的 Go 运行时响应流式能力有限，
+部署前需确认，必要时改用 Netlify Server + Node 代理。
 
 Xray 客户端示例（`network` 用 `xhttp` 或旧名 `splithttp`）：
 
@@ -122,7 +124,8 @@ Northflank 会注入 `NF_HOSTS`（可能包含多个逗号分隔的地址），�
 
 Netlify 会注入 `NETLIFY=true` 和稳定的 `URL`；`DEPLOY_URL` / `DEPLOY_PRIME_URL`
 随部署变化，不会作为节点地址。Netlify Functions 的 Go 运行时只支持 HTTP 请求/响应，
-请使用 packet-up 模式；WebSocket 在 Netlify Functions 上不可用。
+packet-up 依赖下载 GET 的流式响应，部署前需确认运行时支持；WebSocket 在 Netlify
+Functions 上不可用。
 
 ## 客户端
 
