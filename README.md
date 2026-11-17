@@ -5,6 +5,21 @@
 只保留三件事：WebSocket 握手、VLESS 头解析 + UUID 认证、TCP/UDP 转发。
 没有 TLS、隧道、管理后台和流量统计。
 
+## 代码结构
+
+| 文件 | 职责 |
+| --- | --- |
+| `main.go` | 启动流程、节点同步调度、优雅退出 |
+| `config.go` | 命令行/环境变量解析、路径规范化 |
+| `server.go` | 服务器状态、用户表、健康检查、WS/XHTTP 分流 |
+| `websocket.go` | WebSocket 握手、TCP/UDP 转发、心跳 |
+| `xhttp.go` | XHTTP stream-one 请求与 TCP/UDP 字节流转发 |
+| `protocol.go` | VLESS 请求头解析（内存缓冲与流式两种） |
+| `node.go` | CONFIG 解析、节点上报、设备同步 |
+| `platform.go` | 运行时识别、公网 hosts、IP/地理位置查询 |
+| `users.go` | UUID 列表解析 |
+| `constants.go` | 协议、超时与默认路径常量 |
+
 ## 运行
 
 ```bash
