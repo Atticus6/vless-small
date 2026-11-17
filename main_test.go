@@ -797,6 +797,59 @@ func TestXHTTPPacketUpTCP(t *testing.T) {
 	}
 }
 
+func TestXHTTPPacketUpUDP(t *testing.T) {
+	id := mustTestUUID(t)
+	echo := startUDPEcho(t)
+	srv := newServer(map[[16]byte]struct{}{id: {}}, "")
+	srv.xhttpPath = "/xhttp"
+	ts := httptest.NewServer(http.HandlerFunc(srv.handleHTTP))
+	defer ts.Close()
+
+	sessionID := strings.Repeat("b", 32)
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	body := []byte("dns")
+	pkt := binary.BigEndian.AppendUint16(nil, uint16(len(body)))
+	pkt = append(pkt, body...)
+	request := buildRequest(t, id, cmdUDP, echo, pkt)
+
+	resp, err := client.Post(
+		fmt.Sprintf("%s/xhttp/%s/0", ts.URL, sessionID),
+		"application/octet-stream",
+		bytes.NewReader(request),
+	)
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("upload status: %s", resp.Status)
+	}
+
+	download, err := client.Get(ts.URL + "/xhttp/" + sessionID)
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	defer download.Body.Close()
+
+	// UDP 会话会保持到 idle 超时，读到预期字节后直接关闭，不等待 EOF。
+	got := make([]byte, 2+2+len(body))
+	if _, err := io.ReadFull(download.Body, got); err != nil {
+		t.Fatalf("read download: %v", err)
+	}
+	if !bytes.HasPrefix(got, []byte{vlessVersion, 0}) {
+		t.Fatalf("response header = %v", got)
+	}
+	payload := got[2:]
+	if len(payload) < 2 {
+		t.Fatalf("udp response too short: %d", len(payload))
+	}
+	n := int(binary.BigEndian.Uint16(payload[:2]))
+	if n != len(body) || !bytes.Equal(payload[2:2+n], body) {
+		t.Fatalf("udp response = %q", payload)
+	}
+}
+
 func TestNormalizeHTTPPath(t *testing.T) {
 	cases := map[string]string{
 		"":            "",
