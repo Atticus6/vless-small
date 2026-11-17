@@ -170,11 +170,16 @@ func (s *server) getXHTTPSession(id string) *xhttpSession {
 
 // getOrCreateXHTTPSession 获取或创建会话，并启动 30 秒 reaper.
 // packet-up 客户端会先发下载 GET 再发上传 POST，也可能相反，两种顺序都支持。
-func (s *server) getOrCreateXHTTPSession(id string) *xhttpSession {
+// 新建会话超过上限时返回 false，避免随机 session 撑爆内存。
+func (s *server) getOrCreateXHTTPSession(id string) (*xhttpSession, bool) {
 	s.sessionsMu.Lock()
 	if session, ok := s.sessions[id]; ok {
 		s.sessionsMu.Unlock()
-		return session
+		return session, true
+	}
+	if len(s.sessions) >= xhttpMaxSessions {
+		s.sessionsMu.Unlock()
+		return nil, false
 	}
 
 	session := newXHTTPSession(id)
@@ -201,7 +206,7 @@ func (s *server) getOrCreateXHTTPSession(id string) *xhttpSession {
 		}
 	}()
 
-	return session
+	return session, true
 }
 
 func (s *server) dropXHTTPSession(id string, session *xhttpSession) {
@@ -257,7 +262,11 @@ func (s *server) handleXHTTPUpload(
 		return
 	}
 
-	session := s.getOrCreateXHTTPSession(sessionID)
+	session, ok := s.getOrCreateXHTTPSession(sessionID)
+	if !ok {
+		http.Error(w, "too many xhttp sessions", http.StatusServiceUnavailable)
+		return
+	}
 	if err := session.queue.Push(seq, payload); err != nil {
 		log.Printf("xhttp packet-up push %s seq=%d: %v", sessionID, seq, err)
 		http.Error(w, err.Error(), http.StatusConflict)
@@ -281,7 +290,11 @@ func (s *server) handleXHTTPDownload(
 		return
 	}
 
-	session := s.getOrCreateXHTTPSession(sessionID)
+	session, ok := s.getOrCreateXHTTPSession(sessionID)
+	if !ok {
+		http.Error(w, "too many xhttp sessions", http.StatusServiceUnavailable)
+		return
+	}
 	session.markConnected()
 	defer s.dropXHTTPSession(sessionID, session)
 

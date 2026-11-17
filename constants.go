@@ -43,5 +43,6 @@ const (
 	xhttpPacketMaxBytes     = 4 << 20  // 4 MiB
 	xhttpMaxBufferedPackets = 64       // 乱序包数量上限
 	xhttpMaxBufferedBytes   = 16 << 20 // 16 MiB
+	xhttpMaxSessions        = 256      // 防止随机 session 消耗内存
 	xhttpSessionReapTimeout = 30 * time.Second
 )
