@@ -543,7 +543,6 @@ func TestDetectRuntimeAndHosts(t *testing.T) {
 		"CF_PAGES", "CF_PAGES_URL",
 		"ZEABUR", "ZEABUR_WEB_URL",
 		"NF_HOSTS", "NF_PLAN_ID",
-		"NETLIFY", "NETLIFY_DEV", "URL", "SITE_NAME", "DEPLOY_URL", "DEPLOY_PRIME_URL",
 		"NORTHFLANK", "NORTHFLANK_SERVICE_ID", "NORTHFLANK_PROJECT_ID",
 		"NORTHFLANK_PUBLIC_URL", "NORTHFLANK_SERVICE_URL", "SERVICE_URL",
 	} {
@@ -576,7 +575,6 @@ func TestDetectNorthflank(t *testing.T) {
 		"CF_PAGES", "CF_PAGES_URL",
 		"ZEABUR", "ZEABUR_WEB_URL",
 		"NF_HOSTS", "NF_PLAN_ID",
-		"NETLIFY", "NETLIFY_DEV", "URL", "SITE_NAME", "DEPLOY_URL", "DEPLOY_PRIME_URL",
 		"SERVICE_URL", "PUBLIC_URL",
 	} {
 		t.Setenv(key, "")
@@ -595,40 +593,8 @@ func TestDetectNorthflank(t *testing.T) {
 	}
 }
 
-func TestDetectNetlify(t *testing.T) {
-	for _, key := range []string{
-		"NODE_RUNTIME", "RUNTIME",
-		"PUBLIC_HOST", "PUBLIC_HOSTS",
-		"VERCEL", "VERCEL_URL", "VERCEL_PROJECT_PRODUCTION_URL",
-		"RAILWAY_ENVIRONMENT", "RAILWAY_PUBLIC_DOMAIN",
-		"RENDER", "RENDER_EXTERNAL_URL", "RENDER_EXTERNAL_HOSTNAME",
-		"FLY_APP_NAME",
-		"KOYEB_APP_NAME", "KOYEB_PUBLIC_DOMAIN",
-		"CF_PAGES", "CF_PAGES_URL",
-		"ZEABUR", "ZEABUR_WEB_URL",
-		"NF_HOSTS", "NF_PLAN_ID",
-		"NETLIFY", "NETLIFY_DEV", "URL", "SITE_NAME", "DEPLOY_URL", "DEPLOY_PRIME_URL",
-		"SERVICE_URL", "PUBLIC_URL",
-	} {
-		t.Setenv(key, "")
-	}
-
-	t.Setenv("NETLIFY", "true")
-	t.Setenv("URL", "https://vless-demo.netlify.app")
-	// 每次部署/分支预览变化的地址不能作为稳定节点地址。
-	t.Setenv("DEPLOY_PRIME_URL", "https://deploy-preview-1--vless-demo.netlify.app")
-
-	if got := detectRuntime(); got != "netlify" {
-		t.Fatalf("runtime = %q, want netlify", got)
-	}
-	hosts := detectHosts()
-	if len(hosts) != 1 || hosts[0] != "vless-demo.netlify.app" {
-		t.Fatalf("hosts = %v, want [vless-demo.netlify.app]", hosts)
-	}
-}
-
 func TestIsAutoSleepRuntime(t *testing.T) {
-	for _, runtime := range []string{"vercel", "railway", "netlify"} {
+	for _, runtime := range []string{"vercel", "railway"} {
 		if !isAutoSleepRuntime(runtime) {
 			t.Fatalf("%s should disable background sync", runtime)
 		}

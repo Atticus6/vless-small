@@ -1,6 +1,0 @@
-[build]
-  # Netlify Functions 2.0 会直接托管 netlify/functions。
-  publish = "public"
-
-[functions]
-  directory = "netlify/functions"
