@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -53,6 +54,7 @@ type server struct {
 	users    map[[16]byte]struct{}
 	path     string // 为空表示任意路径都接受
 	upgrader websocket.Upgrader
+	active   atomic.Int64
 }
 
 func newServer(users map[[16]byte]struct{}, path string) *server {
@@ -101,11 +103,15 @@ func main() {
 	// Ctrl+C / SIGTERM 时优雅退出.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = httpServer.Shutdown(shutdownCtx)
+		// Shutdown 不跟踪 hijack 后的 WebSocket, 再给转发会话一段排空时间.
+		srv.waitDrain(5 * time.Second)
 	}()
 
 	displayPath := wsPath
@@ -116,10 +122,22 @@ func main() {
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+	<-shutdownDone
+}
+
+// waitDrain 等待已升级的 WebSocket 会话结束, 最多等 timeout.
+func (s *server) waitDrain(timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for s.active.Load() > 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // handleWS 完成握手、认证, 然后按命令分发到 TCP/UDP 转发.
 func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
+	s.active.Add(1)
+	defer s.active.Add(-1)
+
 	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		http.Error(w, "websocket upgrade required", http.StatusUpgradeRequired)
 		return
@@ -137,10 +155,8 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer ws.Close()
 
 	ws.SetReadLimit(maxMessageSize)
+	// 认证完成前不续期, 防止未认证连接靠 pong 一直占着资源.
 	ws.SetReadDeadline(time.Now().Add(headerTimeout))
-	ws.SetPongHandler(func(string) error {
-		return ws.SetReadDeadline(time.Now().Add(readTimeout))
-	})
 
 	// 首条 WS 消息固定是 VLESS 请求头, 可能附带 early data.
 	_, head, err := ws.ReadMessage()
@@ -158,6 +174,10 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 认证通过后再启用 pong 续期, 未认证连接无法拖延 headerTimeout.
+	ws.SetPongHandler(func(string) error {
+		return ws.SetReadDeadline(time.Now().Add(readTimeout))
+	})
 	ws.SetReadDeadline(time.Now().Add(readTimeout))
 
 	// 保活: 定时 ping, 客户端回 pong 时续期读超时.
@@ -261,8 +281,11 @@ func (s *server) relayUDP(ws *websocket.Conn, target string, early []byte) {
 	if err := writeMessage(ws, []byte{vlessVersion, 0}); err != nil {
 		return
 	}
+	framer := &udpFramer{}
 	if len(early) > 0 {
-		forwardUDP(conn, early)
+		if err := framer.feed(conn, early); err != nil {
+			return
+		}
 	}
 
 	go func() {
@@ -274,7 +297,9 @@ func (s *server) relayUDP(ws *websocket.Conn, target string, early []byte) {
 			}
 			_ = ws.SetReadDeadline(time.Now().Add(readTimeout))
 			if len(data) > 0 {
-				forwardUDP(conn, data)
+				if err := framer.feed(conn, data); err != nil {
+					return
+				}
 			}
 		}
 	}()
@@ -297,22 +322,31 @@ func (s *server) relayUDP(ws *websocket.Conn, target string, early []byte) {
 	}
 }
 
-// forwardUDP 把 [len][data] 拼接包逐个写到 UDP 远端.
-func forwardUDP(conn net.Conn, data []byte) {
-	for len(data) >= 2 {
-		n := int(binary.BigEndian.Uint16(data))
-		data = data[2:]
-		if n > len(data) {
-			log.Printf("drop truncated udp packet: want %d, have %d", n, len(data))
-			return
+// udpFramer 按 VLESS UDP 字节流重组 [2B 长度][payload] 包.
+// 包边界与 WebSocket 消息边界无关, 不完整的包留到下一帧继续拼.
+type udpFramer struct {
+	buf []byte
+}
+
+func (f *udpFramer) feed(conn net.Conn, data []byte) error {
+	f.buf = append(f.buf, data...)
+	for {
+		if len(f.buf) < 2 {
+			return nil
+		}
+		n := int(binary.BigEndian.Uint16(f.buf[:2]))
+		if len(f.buf) < 2+n {
+			return nil
 		}
 		if n > 0 {
 			_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-			if _, err := conn.Write(data[:n]); err != nil {
-				return
+			if _, err := conn.Write(f.buf[2 : 2+n]); err != nil {
+				return err
 			}
+			// 上行数据也算会话活跃, 避免只发不收时被 idle 超时误杀.
+			_ = conn.SetReadDeadline(time.Now().Add(udpIdleTimeout))
 		}
-		data = data[n:]
+		f.buf = f.buf[2+n:]
 	}
 }
 
