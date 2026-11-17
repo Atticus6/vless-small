@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -56,10 +57,18 @@ const (
 	nodeSyncInterval = 60 * time.Second
 )
 
+// XHTTP 默认路径。主控订阅固定下发 /xhttp，节点默认保持一致；
+// 需要关闭时显式设置 XHTTP_PATH=none（或 off）。
+const (
+	defaultXHTTPPath   = "/xhttp"
+	xhttpDisabledValue = "none"
+)
+
 // server 持有可热更新的用户表与 WS 配置, 可被多个连接并发使用.
 type server struct {
 	users     atomic.Pointer[map[[16]byte]struct{}]
-	path      string // 为空表示任意路径都接受
+	path      string // WebSocket 路径；为空表示任意路径都接受
+	xhttpPath string // XHTTP stream-one 路径；为空表示不启用
 	upgrader  websocket.Upgrader
 	active    atomic.Int64
 	startedAt time.Time
@@ -118,6 +127,11 @@ func main() {
 	listen := flag.String("listen", defaultListen, "HTTP listen address")
 	uuidList := flag.String("uuid", os.Getenv("UUID"), "comma-separated VLESS UUIDs")
 	path := flag.String("path", os.Getenv("WS_PATH"), "WebSocket path to accept (empty = any)")
+	xhttpPathFlag := flag.String(
+		"xhttp-path",
+		os.Getenv("XHTTP_PATH"),
+		"XHTTP stream-one path (default /xhttp; use none to disable)",
+	)
 	config := flag.String("config", os.Getenv("CONFIG"), "control plane: <baseURL>_<name>_<token>")
 	flag.Parse()
 
@@ -138,8 +152,13 @@ func main() {
 	if wsPath != "" && !strings.HasPrefix(wsPath, "/") {
 		wsPath = "/" + wsPath
 	}
+	xhttpPath := resolveXHTTPPath(*xhttpPathFlag)
+	if xhttpPath != "" && xhttpPath == wsPath {
+		log.Fatal("XHTTP_PATH must differ from WS_PATH")
+	}
 
 	srv := newServer(users, wsPath)
+	srv.xhttpPath = xhttpPath
 	if nodeCfg.baseURL != "" {
 		info := collectNodeInfo()
 		log.Printf(
@@ -160,7 +179,7 @@ func main() {
 	}
 	httpServer := &http.Server{
 		Addr:              *listen,
-		Handler:           http.HandlerFunc(srv.handleWS),
+		Handler:           http.HandlerFunc(srv.handleHTTP),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -182,11 +201,52 @@ func main() {
 	if displayPath == "" {
 		displayPath = "*"
 	}
-	log.Printf("vless-ws listening on %s (path=%s, users=%d)", *listen, displayPath, srv.userCount())
+	displayXHTTP := xhttpPath
+	if displayXHTTP == "" {
+		displayXHTTP = "disabled"
+	}
+	log.Printf(
+		"vless-ws listening on %s (path=%s, xhttp=%s, users=%d)",
+		*listen, displayPath, displayXHTTP, srv.userCount(),
+	)
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 	<-shutdownDone
+}
+
+// resolveXHTTPPath 解析 XHTTP 路径。
+//
+// 空值使用默认 /xhttp（主控订阅默认包含 XHTTP 节点）；
+// none/off/- 用于显式禁用，其他值按路径规范化。
+func resolveXHTTPPath(raw string) string {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
+	case "":
+		return defaultXHTTPPath
+	case xhttpDisabledValue, "off", "-":
+		return ""
+	default:
+		return normalizeHTTPPath(raw)
+	}
+}
+
+// normalizeHTTPPath 统一路径格式：确保以 / 开头，去掉尾部斜杠.
+func normalizeHTTPPath(raw string) string {
+	path := strings.TrimSpace(raw)
+	if path == "" {
+		return ""
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	if len(path) > 1 {
+		path = strings.TrimRight(path, "/")
+	}
+	if path == "" {
+		return "/"
+	}
+	return path
 }
 
 // waitDrain 等待已升级的 WebSocket 会话结束, 最多等 timeout.
@@ -279,6 +339,190 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.relayUDP(ws, target, payload)
 	default:
 		log.Printf("unsupported command %d from %s", cmd, r.RemoteAddr)
+	}
+}
+
+// handleHTTP 按路径分发 WebSocket / XHTTP stream-one 请求.
+func (s *server) handleHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.xhttpPath != "" && strings.HasPrefix(r.URL.Path, s.xhttpPath) {
+		s.handleXHTTP(w, r)
+		return
+	}
+	s.handleWS(w, r)
+}
+
+// handleXHTTP 实现 XHTTP stream-one：一个 HTTP 请求同时承载上下行，
+// 不拆分 upload/download 请求。请求体是 VLESS 上行流，响应体是下行流.
+func (s *server) handleXHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	reader := bufio.NewReader(r.Body)
+	id, cmd, target, err := parseRequestStream(reader)
+	if err != nil {
+		log.Printf("xhttp bad request %s: %v", r.RemoteAddr, err)
+		http.Error(w, "bad vless header", http.StatusBadRequest)
+		return
+	}
+	if !s.hasUser(id) {
+		log.Printf("xhttp reject %s: unknown UUID", r.RemoteAddr)
+		http.Error(w, "unknown UUID", http.StatusForbidden)
+		return
+	}
+
+	s.active.Add(1)
+	defer s.active.Add(-1)
+
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
+	writer := &flushWriter{Writer: w, flusher: flusher}
+
+	switch cmd {
+	case cmdTCP:
+		s.relayTCPStream(r.Context(), reader, writer, target)
+	case cmdUDP:
+		s.relayUDPStream(r.Context(), reader, writer, target)
+	default:
+		log.Printf("xhttp unsupported command %d from %s", cmd, r.RemoteAddr)
+	}
+}
+
+// flushWriter 每次写入后 flush，避免反向代理缓冲 XHTTP 下行.
+type flushWriter struct {
+	io.Writer
+	flusher http.Flusher
+}
+
+func (w *flushWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	if w.flusher != nil {
+		w.flusher.Flush()
+	}
+	return n, err
+}
+
+// relayTCPStream: XHTTP 字节流 <-> 目标 TCP.
+func (s *server) relayTCPStream(
+	ctx context.Context,
+	reader io.Reader,
+	writer io.Writer,
+	target string,
+) {
+	conn, err := net.DialTimeout("tcp", target, dialTimeout)
+	if err != nil {
+		log.Printf("xhttp dial %s: %v", target, err)
+		return
+	}
+	defer conn.Close()
+
+	// 客户端断开 HTTP 请求时主动关闭目标连接，避免等待读超时。
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stop:
+		}
+	}()
+
+	// VLESS 响应头: version + addon 长度 0.
+	if _, err := writer.Write([]byte{vlessVersion, 0}); err != nil {
+		return
+	}
+
+	done := make(chan bool, 2)
+	go func() {
+		_, _ = io.Copy(conn, reader)
+		done <- true
+	}()
+	go func() {
+		_, _ = io.Copy(writer, conn)
+		done <- false
+	}()
+
+	if <-done {
+		// 上行 EOF 后不调用 CloseWrite：XHTTP 经过 Clash TUN、Vercel 等中间层时，
+		// 半关闭常被当成整条连接关闭，目标响应还没读回就被丢弃。
+		// stream-one 的上行结束通常意味着整个会话结束，保持读方向直到目标自然关闭即可。
+		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+		<-done
+	}
+}
+
+// relayUDPStream: XHTTP 字节流 <-> 目标 UDP.
+// 上行包格式与 VLESS UDP 一致: [2B 大端长度][payload].
+func (s *server) relayUDPStream(
+	ctx context.Context,
+	reader io.Reader,
+	writer io.Writer,
+	target string,
+) {
+	conn, err := net.DialTimeout("udp", target, dialTimeout)
+	if err != nil {
+		log.Printf("xhttp dial udp %s: %v", target, err)
+		return
+	}
+	defer conn.Close()
+
+	// 客户端断开 HTTP 请求时主动关闭目标连接.
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stop:
+		}
+	}()
+
+	if _, err := writer.Write([]byte{vlessVersion, 0}); err != nil {
+		return
+	}
+
+	go func() {
+		defer conn.Close()
+		for {
+			var lenBuf [2]byte
+			if _, err := io.ReadFull(reader, lenBuf[:]); err != nil {
+				return
+			}
+			n := int(binary.BigEndian.Uint16(lenBuf[:]))
+			payload := make([]byte, n)
+			if _, err := io.ReadFull(reader, payload); err != nil {
+				return
+			}
+			_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if _, err := conn.Write(payload); err != nil {
+				return
+			}
+			_ = conn.SetReadDeadline(time.Now().Add(udpIdleTimeout))
+		}
+	}()
+
+	buf := make([]byte, 64*1024+2)
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(udpIdleTimeout))
+		n, err := conn.Read(buf[2:])
+		if err != nil {
+			return
+		}
+		if n == 0 {
+			continue
+		}
+		binary.BigEndian.PutUint16(buf[:2], uint16(n))
+		if _, err := writer.Write(buf[:2+n]); err != nil {
+			return
+		}
 	}
 }
 
@@ -511,6 +755,73 @@ func parseRequest(b []byte) (id [16]byte, cmd byte, target string, payload []byt
 
 	target = net.JoinHostPort(host, strconv.Itoa(int(port)))
 	payload = b[off:]
+	return
+}
+
+// parseRequestStream 从字节流中读取 VLESS 请求头.
+// 与 parseRequest 的区别是：只消费头部，early data 留在 bufio.Reader 中，
+// 供后续 TCP/UDP relay 直接读取.
+func parseRequestStream(r *bufio.Reader) (id [16]byte, cmd byte, target string, err error) {
+	head := make([]byte, 18)
+	if _, err = io.ReadFull(r, head); err != nil {
+		return
+	}
+	if head[0] != vlessVersion {
+		err = fmt.Errorf("unsupported version: %d", head[0])
+		return
+	}
+	copy(id[:], head[1:17])
+
+	addonLen := int(head[17])
+	if addonLen > 0 {
+		if _, err = io.CopyN(io.Discard, r, int64(addonLen)); err != nil {
+			return
+		}
+	}
+
+	fixed := make([]byte, 4)
+	if _, err = io.ReadFull(r, fixed); err != nil {
+		return
+	}
+	cmd = fixed[0]
+	port := binary.BigEndian.Uint16(fixed[1:3])
+	atyp := fixed[3]
+
+	var host string
+	switch atyp {
+	case atypIPv4:
+		b := make([]byte, 4)
+		if _, err = io.ReadFull(r, b); err != nil {
+			return
+		}
+		host = net.IP(b).String()
+	case atypDomain:
+		n, readErr := r.ReadByte()
+		if readErr != nil {
+			err = readErr
+			return
+		}
+		b := make([]byte, int(n))
+		if _, err = io.ReadFull(r, b); err != nil {
+			return
+		}
+		host = string(b)
+	case atypIPv6:
+		b := make([]byte, 16)
+		if _, err = io.ReadFull(r, b); err != nil {
+			return
+		}
+		host = net.IP(b).String()
+	default:
+		err = fmt.Errorf("unsupported address type: %d", atyp)
+		return
+	}
+	if host == "" {
+		err = fmt.Errorf("empty target host")
+		return
+	}
+
+	target = net.JoinHostPort(host, strconv.Itoa(int(port)))
 	return
 }
 

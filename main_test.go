@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
@@ -116,6 +117,31 @@ func startTCPEcho(t *testing.T) string {
 				_, _ = io.Copy(conn, conn)
 			}()
 		}
+	}()
+	return ln.Addr().String()
+}
+
+// startOneShotEcho 回显第一段数据后立即关闭，模拟请求-响应型目标。
+func startOneShotEcho(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		buf := make([]byte, 1024)
+		n, err := conn.Read(buf)
+		if err != nil || n == 0 {
+			return
+		}
+		_, _ = conn.Write(buf[:n])
 	}()
 	return ln.Addr().String()
 }
@@ -606,6 +632,97 @@ func TestLookupIPInfo(t *testing.T) {
 	}
 	if *info.latitude != 22.3 || *info.longitude != 114.2 {
 		t.Fatalf("loc = %v,%v", *info.latitude, *info.longitude)
+	}
+}
+
+func TestParseRequestStream(t *testing.T) {
+	id := mustTestUUID(t)
+	header := buildRequest(t, id, cmdTCP, "example.com:443", []byte("early"))
+	reader := bufio.NewReader(bytes.NewReader(header))
+
+	gotID, cmd, target, err := parseRequestStream(reader)
+	if err != nil {
+		t.Fatalf("parseRequestStream: %v", err)
+	}
+	if gotID != id {
+		t.Fatalf("id = %x, want %x", gotID, id)
+	}
+	if cmd != cmdTCP {
+		t.Fatalf("cmd = %d, want %d", cmd, cmdTCP)
+	}
+	if target != "example.com:443" {
+		t.Fatalf("target = %q", target)
+	}
+	early, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read early data: %v", err)
+	}
+	if string(early) != "early" {
+		t.Fatalf("early data = %q", early)
+	}
+}
+
+func TestXHTTPStreamOneTCP(t *testing.T) {
+	id := mustTestUUID(t)
+	// 用一次性回显：目标收到数据后立即响应并关闭。XHTTP 不依赖客户端半关闭，
+	// 这样测试不会因为目标等待 EOF 而耗到读超时。
+	echo := startOneShotEcho(t)
+	srv := newServer(map[[16]byte]struct{}{id: {}}, "")
+	srv.xhttpPath = "/xhttp"
+
+	payload := buildRequest(t, id, cmdTCP, echo, []byte("ping"))
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/xhttp", bytes.NewReader(payload))
+	rec := httptest.NewRecorder()
+
+	srv.handleHTTP(rec, req)
+	res := rec.Result()
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !bytes.HasPrefix(body, []byte{vlessVersion, 0}) {
+		t.Fatalf("response header = %v", body)
+	}
+	if !bytes.Contains(body, []byte("ping")) {
+		t.Fatalf("response body = %q, want echoed ping", body)
+	}
+}
+
+func TestNormalizeHTTPPath(t *testing.T) {
+	cases := map[string]string{
+		"":            "",
+		"xhttp":       "/xhttp",
+		"/xhttp/":     "/xhttp",
+		" /xhttp/ws ": "/xhttp/ws",
+		"/":           "/",
+	}
+	for input, want := range cases {
+		if got := normalizeHTTPPath(input); got != want {
+			t.Fatalf("normalizeHTTPPath(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestResolveXHTTPPath(t *testing.T) {
+	cases := map[string]string{
+		"":        "/xhttp",
+		"  ":      "/xhttp",
+		"xhttp":   "/xhttp",
+		"/xhttp/": "/xhttp",
+		"none":    "",
+		"OFF":     "",
+		"-":       "",
+		"/custom": "/custom",
+	}
+	for input, want := range cases {
+		if got := resolveXHTTPPath(input); got != want {
+			t.Fatalf("resolveXHTTPPath(%q) = %q, want %q", input, got, want)
+		}
 	}
 }
 

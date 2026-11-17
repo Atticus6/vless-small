@@ -23,7 +23,37 @@ go run . -uuid 14725836-1234-5678-9abc-def012345678 -listen :8080 -path /ws
 | `-listen` / `PORT` | `:8080` | 监听地址；`PORT=9000` 时监听 `:9000` |
 | `-uuid` / `UUID` | — | 逗号分隔的静态 UUID；设置 `CONFIG` 时可选 |
 | `-path` / `WS_PATH` | 空（任意路径） | 只接受指定 WS 路径，如 `/ws` |
+| `-xhttp-path` / `XHTTP_PATH` | `/xhttp` | XHTTP stream-one 路径；设为 `none` / `off` 可禁用 |
 | `-config` / `CONFIG` | — | `<baseURL>_<name>_<token>`，用于向主控上报并同步设备 |
+
+## XHTTP
+
+XHTTP 默认启用，路径为 `/xhttp`，实现的是 **stream-one**：同一个 HTTP 请求同时承载上行和下行，
+不实现 packet-up / stream-up 的上下行分流。请求体是 VLESS 字节流，响应体是下行字节流。
+
+主控订阅会同时下发 WS 与 XHTTP 节点，节点默认路径与订阅里的 `/xhttp` 一致，因此无需额外配置：
+
+```bash
+CONFIG=... go run .
+```
+
+需要禁用 XHTTP 时设置 `XHTTP_PATH=none`；改路径则设置如 `XHTTP_PATH=/custom`，
+并同步修改主控的节点路径（当前订阅固定为 `/xhttp`）。
+
+Xray 客户端示例（`network` 用 `xhttp` 或旧名 `splithttp`）：
+
+```json
+{
+  "network": "xhttp",
+  "xhttpSettings": {
+    "path": "/xhttp",
+    "mode": "stream-one"
+  }
+}
+```
+
+stream-one 需要端到端支持双向流式传输（直连 TLS/REALITY 或 HTTP/2）；经 Nginx/Cloudflare
+时请使用 gRPC 透传配置，普通 HTTP/1.1 反向代理可能缓冲请求体导致失败。
 
 ## HTTP 健康检查
 
