@@ -44,6 +44,8 @@ func detectRuntime() string {
 		return "cloudflare"
 	case envSet("ZEABUR") || envSet("ZEABUR_WEB_URL"):
 		return "zeabur"
+	case isNetlify():
+		return "netlify"
 	case envPrefixSet("NF_"):
 		return "northflank"
 	default:
@@ -53,6 +55,12 @@ func detectRuntime() string {
 
 func envSet(key string) bool {
 	return strings.TrimSpace(os.Getenv(key)) != ""
+}
+
+// isNetlify 识别 Netlify Functions/Server 运行时。
+// NETLIFY=true 是 Netlify 注入的主要标记，NETLIFY_DEV 用于本地 dev.
+func isNetlify() bool {
+	return envSet("NETLIFY") || envSet("NETLIFY_DEV")
 }
 
 // envPrefixSet 检查是否存在以 prefix 开头的环境变量。
@@ -70,7 +78,7 @@ func envPrefixSet(prefix string) bool {
 // 这类平台不能跑后台轮询，否则持续请求会阻止实例休眠。
 // Northflank 可以常驻，因此保持后台同步。
 func isAutoSleepRuntime(runtime string) bool {
-	return runtime == "vercel" || runtime == "railway"
+	return runtime == "vercel" || runtime == "railway" || runtime == "netlify"
 }
 
 // detectHosts 获取平台分配的公网地址.
@@ -85,6 +93,17 @@ func detectHosts() []string {
 	// Northflank 注入的 NF_HOSTS 可能包含多个地址，用逗号或空白分隔。
 	if raw := strings.TrimSpace(os.Getenv("NF_HOSTS")); raw != "" {
 		return normalizeHosts(strings.Fields(strings.ReplaceAll(raw, ",", " ")))
+	}
+
+	// Netlify 的 URL 是稳定主站地址；DEPLOY_URL / DEPLOY_PRIME_URL 会随
+	// 每次部署或分支预览变化，不能作为长期节点地址。
+	if isNetlify() {
+		if raw := strings.TrimSpace(os.Getenv("URL")); raw != "" {
+			return normalizeHosts([]string{raw})
+		}
+		if site := strings.TrimSpace(os.Getenv("SITE_NAME")); site != "" {
+			return []string{site + ".netlify.app"}
+		}
 	}
 
 	// 只使用稳定的公网地址：

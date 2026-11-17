@@ -11,9 +11,37 @@ import (
 	"time"
 )
 
-// handleXHTTP 实现 XHTTP stream-one：一个 HTTP 请求同时承载上下行，
-// 不拆分 upload/download 请求。请求体是 VLESS 上行流，响应体是下行流.
+// handleXHTTP 分发 XHTTP 请求：
+//   - POST/PUT /xhttp             → stream-one（请求体同时承载上下行）
+//   - POST/PUT /xhttp/{sid}/{seq} → packet-up 上传分片
+//   - GET      /xhttp/{sid}       → packet-up 下载流
 func (s *server) handleXHTTP(w http.ResponseWriter, r *http.Request) {
+	parts, ok := s.xhttpSubpath(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	switch {
+	case len(parts) == 0:
+		if r.Method == http.MethodPost || r.Method == http.MethodPut {
+			s.handleXHTTPStreamOne(w, r)
+			return
+		}
+	case len(parts) == 1 && r.Method == http.MethodGet:
+		s.handleXHTTPDownload(w, r, parts[0])
+		return
+	case len(parts) == 2 && (r.Method == http.MethodPost || r.Method == http.MethodPut):
+		s.handleXHTTPUpload(w, r, parts[0], parts[1])
+		return
+	}
+
+	http.Error(w, "unsupported xhttp request", http.StatusMethodNotAllowed)
+}
+
+// handleXHTTPStreamOne 实现 XHTTP stream-one：一个 HTTP 请求同时承载上下行，
+// 不拆分 upload/download 请求。请求体是 VLESS 上行流，响应体是下行流.
+func (s *server) handleXHTTPStreamOne(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodPut {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return

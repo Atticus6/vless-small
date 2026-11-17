@@ -35,3 +35,13 @@ const (
 	defaultXHTTPPath   = "/xhttp"
 	xhttpDisabledValue = "none"
 )
+
+// XHTTP packet-up 限制。
+// 单次 POST 上限与 Xray 默认 sc-max-each-post-bytes 对齐；
+// 缓冲上限用于约束乱序上传队列的内存占用。
+const (
+	xhttpPacketMaxBytes     = 4 << 20  // 4 MiB
+	xhttpMaxBufferedPackets = 64       // 乱序包数量上限
+	xhttpMaxBufferedBytes   = 16 << 20 // 16 MiB
+	xhttpSessionReapTimeout = 30 * time.Second
+)

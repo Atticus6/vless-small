@@ -14,6 +14,7 @@
 | `server.go` | 服务器状态、用户表、健康检查、WS/XHTTP 分流 |
 | `websocket.go` | WebSocket 握手、TCP/UDP 转发、心跳 |
 | `xhttp.go` | XHTTP stream-one 请求与 TCP/UDP 字节流转发 |
+| `xhttp_packet.go` | XHTTP packet-up 会话、上传队列与下载流 |
 | `protocol.go` | VLESS 请求头解析（内存缓冲与流式两种） |
 | `node.go` | CONFIG 解析、节点上报、设备同步 |
 | `platform.go` | 运行时识别、公网 hosts、IP/地理位置查询 |
@@ -38,13 +39,19 @@ go run . -uuid 14725836-1234-5678-9abc-def012345678 -listen :8080 -path /ws
 | `-listen` / `PORT` | `:8080` | 监听地址；`PORT=9000` 时监听 `:9000` |
 | `-uuid` / `UUID` | — | 逗号分隔的静态 UUID；设置 `CONFIG` 时可选 |
 | `-path` / `WS_PATH` | 空（任意路径） | 只接受指定 WS 路径，如 `/ws` |
-| `-xhttp-path` / `XHTTP_PATH` | `/xhttp` | XHTTP stream-one 路径；设为 `none` / `off` 可禁用 |
+| `-xhttp-path` / `XHTTP_PATH` | `/xhttp` | XHTTP 路径；设为 `none` / `off` 可禁用 |
 | `-config` / `CONFIG` | — | `<baseURL>_<name>_<token>`，用于向主控上报并同步设备 |
 
 ## XHTTP
 
-XHTTP 默认启用，路径为 `/xhttp`，实现的是 **stream-one**：同一个 HTTP 请求同时承载上行和下行，
-不实现 packet-up / stream-up 的上下行分流。请求体是 VLESS 字节流，响应体是下行字节流。
+XHTTP 默认启用，路径为 `/xhttp`，支持两种模式：
+
+- **stream-one**：`POST /xhttp`，请求体承载上行、响应体承载下行，适合直连或常驻容器。
+- **packet-up**：`POST /xhttp/{session}/{seq}` 发送上传分片，`GET /xhttp/{session}` 接收下载流。
+  每个 POST 都是完整请求，适合会缓冲请求体的 Serverless 平台（Vercel / Netlify）。
+
+packet-up 会话 30 秒内没有下载 GET 会被清理；上传队列最多缓冲 64 个乱序包、16 MiB。
+主控订阅会按节点 runtime 自动选择模式：Vercel / Netlify 使用 packet-up，其他节点使用 stream-one。
 
 主控订阅会同时下发 WS 与 XHTTP 节点，节点默认路径与订阅里的 `/xhttp` 一致，因此无需额外配置：
 
@@ -55,8 +62,8 @@ CONFIG=... go run .
 需要禁用 XHTTP 时设置 `XHTTP_PATH=none`；改路径则设置如 `XHTTP_PATH=/custom`，
 并同步修改主控的节点路径（当前订阅固定为 `/xhttp`）。
 
-Vercel Functions 会在调用前缓冲完整请求体（上限 4.5MB），无法承载 stream-one 的双向流式
-请求；Vercel 部署请只使用 WS。XHTTP 需要 Northflank、Railway 等常驻容器/直接 TCP 环境。
+Vercel / Netlify Functions 会缓冲完整请求体，不能使用 stream-one；WebSocket 在 Netlify
+Functions 上也不可用。Serverless 平台请使用 packet-up 的 XHTTP 节点。
 
 Xray 客户端示例（`network` 用 `xhttp` 或旧名 `splithttp`）：
 
@@ -96,8 +103,8 @@ stream-one 需要端到端支持双向流式传输（直连 TLS/REALITY 或 HTTP
 
 | 字段 | 来源 |
 | --- | --- |
-| `runtime` | `NODE_RUNTIME` / `RUNTIME`，否则根据 `VERCEL`、`RAILWAY_*`、`RENDER_*`、`FLY_APP_NAME`、`KOYEB_*`、`CF_PAGES*`、`ZEABUR*`、`NF_*` 自动判断 |
-| `hosts` | `PUBLIC_HOSTS`（逗号分隔）/ `PUBLIC_HOST`，否则读取平台分配的公网域名；Northflank 使用 `NF_HOSTS`（可逗号分隔多个） |
+| `runtime` | `NODE_RUNTIME` / `RUNTIME`，否则根据 `VERCEL`、`RAILWAY_*`、`RENDER_*`、`FLY_APP_NAME`、`KOYEB_*`、`CF_PAGES*`、`ZEABUR*`、`NETLIFY`、`NF_*` 自动判断 |
+| `hosts` | `PUBLIC_HOSTS`（逗号分隔）/ `PUBLIC_HOST`，否则读取平台分配的公网域名；Northflank 使用 `NF_HOSTS`，Netlify 使用 `URL` |
 
 只采集稳定的公网地址：Vercel 使用 `VERCEL_PROJECT_PRODUCTION_URL`（忽略每次部署变化的 `VERCEL_URL`）；
 Cloudflare Pages 不使用 `CF_PAGES_URL`（单次部署地址），请通过 `PUBLIC_HOST` 手动指定生产域名。
@@ -107,11 +114,15 @@ Cloudflare Pages 不使用 `CF_PAGES_URL`（单次部署地址），请通过 `P
 IP 查询默认请求 `https://ipinfo.io/json`，可用 `IP_LOOKUP_URL` 指向其他服务。
 `name` 和 `token` 中不要包含下划线（`CONFIG` 使用下划线分隔）。
 
-在 **Vercel / Railway** 上不会启动 60 秒后台同步，只在冷启动时同步一次，
+在 **Vercel / Railway / Netlify** 上不会启动 60 秒后台同步，只在冷启动时同步一次，
 避免空闲时持续请求让实例无法自动休眠。其他运行环境（包括 Northflank）仍按 60 秒刷新设备列表。
 
 Northflank 会注入 `NF_HOSTS`（可能包含多个逗号分隔的地址），直接读取即可；
 也可以用通用的 `PUBLIC_HOST` / `PUBLIC_HOSTS` 覆盖。
+
+Netlify 会注入 `NETLIFY=true` 和稳定的 `URL`；`DEPLOY_URL` / `DEPLOY_PRIME_URL`
+随部署变化，不会作为节点地址。Netlify Functions 的 Go 运行时只支持 HTTP 请求/响应，
+请使用 packet-up 模式；WebSocket 在 Netlify Functions 上不可用。
 
 ## 客户端
 

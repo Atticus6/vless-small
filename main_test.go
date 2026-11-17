@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -542,6 +543,7 @@ func TestDetectRuntimeAndHosts(t *testing.T) {
 		"CF_PAGES", "CF_PAGES_URL",
 		"ZEABUR", "ZEABUR_WEB_URL",
 		"NF_HOSTS", "NF_PLAN_ID",
+		"NETLIFY", "NETLIFY_DEV", "URL", "SITE_NAME", "DEPLOY_URL", "DEPLOY_PRIME_URL",
 		"NORTHFLANK", "NORTHFLANK_SERVICE_ID", "NORTHFLANK_PROJECT_ID",
 		"NORTHFLANK_PUBLIC_URL", "NORTHFLANK_SERVICE_URL", "SERVICE_URL",
 	} {
@@ -574,6 +576,7 @@ func TestDetectNorthflank(t *testing.T) {
 		"CF_PAGES", "CF_PAGES_URL",
 		"ZEABUR", "ZEABUR_WEB_URL",
 		"NF_HOSTS", "NF_PLAN_ID",
+		"NETLIFY", "NETLIFY_DEV", "URL", "SITE_NAME", "DEPLOY_URL", "DEPLOY_PRIME_URL",
 		"SERVICE_URL", "PUBLIC_URL",
 	} {
 		t.Setenv(key, "")
@@ -592,8 +595,40 @@ func TestDetectNorthflank(t *testing.T) {
 	}
 }
 
+func TestDetectNetlify(t *testing.T) {
+	for _, key := range []string{
+		"NODE_RUNTIME", "RUNTIME",
+		"PUBLIC_HOST", "PUBLIC_HOSTS",
+		"VERCEL", "VERCEL_URL", "VERCEL_PROJECT_PRODUCTION_URL",
+		"RAILWAY_ENVIRONMENT", "RAILWAY_PUBLIC_DOMAIN",
+		"RENDER", "RENDER_EXTERNAL_URL", "RENDER_EXTERNAL_HOSTNAME",
+		"FLY_APP_NAME",
+		"KOYEB_APP_NAME", "KOYEB_PUBLIC_DOMAIN",
+		"CF_PAGES", "CF_PAGES_URL",
+		"ZEABUR", "ZEABUR_WEB_URL",
+		"NF_HOSTS", "NF_PLAN_ID",
+		"NETLIFY", "NETLIFY_DEV", "URL", "SITE_NAME", "DEPLOY_URL", "DEPLOY_PRIME_URL",
+		"SERVICE_URL", "PUBLIC_URL",
+	} {
+		t.Setenv(key, "")
+	}
+
+	t.Setenv("NETLIFY", "true")
+	t.Setenv("URL", "https://vless-demo.netlify.app")
+	// 每次部署/分支预览变化的地址不能作为稳定节点地址。
+	t.Setenv("DEPLOY_PRIME_URL", "https://deploy-preview-1--vless-demo.netlify.app")
+
+	if got := detectRuntime(); got != "netlify" {
+		t.Fatalf("runtime = %q, want netlify", got)
+	}
+	hosts := detectHosts()
+	if len(hosts) != 1 || hosts[0] != "vless-demo.netlify.app" {
+		t.Fatalf("hosts = %v, want [vless-demo.netlify.app]", hosts)
+	}
+}
+
 func TestIsAutoSleepRuntime(t *testing.T) {
-	for _, runtime := range []string{"vercel", "railway"} {
+	for _, runtime := range []string{"vercel", "railway", "netlify"} {
 		if !isAutoSleepRuntime(runtime) {
 			t.Fatalf("%s should disable background sync", runtime)
 		}
@@ -690,6 +725,75 @@ func TestXHTTPStreamOneTCP(t *testing.T) {
 	}
 	if !bytes.Contains(body, []byte("ping")) {
 		t.Fatalf("response body = %q, want echoed ping", body)
+	}
+}
+
+func TestXHTTPPacketUpTCP(t *testing.T) {
+	id := mustTestUUID(t)
+	echo := startOneShotEcho(t)
+	srv := newServer(map[[16]byte]struct{}{id: {}}, "")
+	srv.xhttpPath = "/xhttp"
+	ts := httptest.NewServer(http.HandlerFunc(srv.handleHTTP))
+	defer ts.Close()
+
+	sessionID := strings.Repeat("a", 32)
+	client := &http.Client{Timeout: 5 * time.Second}
+	post := func(seq int, payload []byte) {
+		t.Helper()
+		url := fmt.Sprintf("%s/xhttp/%s/%d", ts.URL, sessionID, seq)
+		resp, err := client.Post(url, "application/octet-stream", bytes.NewReader(payload))
+		if err != nil {
+			t.Fatalf("post seq %d: %v", seq, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("post seq %d: %s %s", seq, resp.Status, body)
+		}
+	}
+
+	request := buildRequest(t, id, cmdTCP, echo, []byte("ping"))
+	split := len(request) / 2
+
+	// 先发 seq=1，再发 seq=0：验证上传队列会按序号重排。
+	post(1, request[split:])
+
+	type downloadResult struct {
+		body []byte
+		err  error
+	}
+	done := make(chan downloadResult, 1)
+	go func() {
+		resp, err := client.Get(ts.URL + "/xhttp/" + sessionID)
+		if err != nil {
+			done <- downloadResult{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			done <- downloadResult{err: fmt.Errorf("download status: %s", resp.Status)}
+			return
+		}
+		body, err := io.ReadAll(resp.Body)
+		done <- downloadResult{body: body, err: err}
+	}()
+
+	time.Sleep(50 * time.Millisecond) // 让下载 GET 先接入会话
+	post(0, request[:split])
+
+	select {
+	case result := <-done:
+		if result.err != nil {
+			t.Fatalf("download: %v", result.err)
+		}
+		if !bytes.HasPrefix(result.body, []byte{vlessVersion, 0}) {
+			t.Fatalf("response header = %v", result.body)
+		}
+		if !bytes.Contains(result.body, []byte("ping")) {
+			t.Fatalf("response body = %q, want echoed ping", result.body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("packet-up download timed out")
 	}
 }
 

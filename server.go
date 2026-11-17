@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -14,10 +15,13 @@ import (
 type server struct {
 	users     atomic.Pointer[map[[16]byte]struct{}]
 	path      string // WebSocket 路径；为空表示任意路径都接受
-	xhttpPath string // XHTTP stream-one 路径；为空表示不启用
+	xhttpPath string // XHTTP stream-one / packet-up 路径；为空表示不启用
 	upgrader  websocket.Upgrader
 	active    atomic.Int64
 	startedAt time.Time
+
+	sessionsMu sync.Mutex
+	sessions   map[string]*xhttpSession
 }
 
 type healthResponse struct {
@@ -30,6 +34,7 @@ func newServer(users map[[16]byte]struct{}, path string) *server {
 	s := &server{
 		path:      path,
 		startedAt: time.Now(),
+		sessions:  make(map[string]*xhttpSession),
 		upgrader: websocket.Upgrader{
 			CheckOrigin:     func(*http.Request) bool { return true },
 			ReadBufferSize:  4096,
