@@ -40,6 +40,9 @@ CONFIG=... go run .
 需要禁用 XHTTP 时设置 `XHTTP_PATH=none`；改路径则设置如 `XHTTP_PATH=/custom`，
 并同步修改主控的节点路径（当前订阅固定为 `/xhttp`）。
 
+Vercel Functions 会在调用前缓冲完整请求体（上限 4.5MB），无法承载 stream-one 的双向流式
+请求；Vercel 部署请只使用 WS。XHTTP 需要 Northflank、Railway 等常驻容器/直接 TCP 环境。
+
 Xray 客户端示例（`network` 用 `xhttp` 或旧名 `splithttp`）：
 
 ```json

@@ -359,16 +359,6 @@ func (s *server) handleXHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf(
-		"xhttp request %s %s proto=%s ct=%q len=%d ua=%q",
-		r.Method,
-		r.URL.Path,
-		r.Proto,
-		r.Header.Get("Content-Type"),
-		r.ContentLength,
-		r.Header.Get("User-Agent"),
-	)
-
 	reader := bufio.NewReader(r.Body)
 	id, cmd, target, err := parseRequestStream(reader)
 	if err != nil {
@@ -387,6 +377,12 @@ func (s *server) handleXHTTP(w http.ResponseWriter, r *http.Request) {
 	s.active.Add(1)
 	defer s.active.Add(-1)
 
+	// HTTP/1.1 下 Go 默认会先消费完请求体再允许写响应；XHTTP stream-one
+	// 需要上行和下行同时进行，否则客户端边上传边等响应会互相死锁。
+	if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
+		log.Printf("xhttp enable full duplex: %v", err)
+	}
+
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -394,9 +390,7 @@ func (s *server) handleXHTTP(w http.ResponseWriter, r *http.Request) {
 
 	flusher, _ := w.(http.Flusher)
 	if flusher != nil {
-		log.Printf("xhttp flush response headers")
 		flusher.Flush()
-		log.Printf("xhttp response headers flushed")
 	}
 	writer := &flushWriter{Writer: w, flusher: flusher}
 
