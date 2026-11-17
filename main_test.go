@@ -541,6 +541,7 @@ func TestDetectRuntimeAndHosts(t *testing.T) {
 		"KOYEB_APP_NAME", "KOYEB_PUBLIC_DOMAIN",
 		"CF_PAGES", "CF_PAGES_URL",
 		"ZEABUR", "ZEABUR_WEB_URL",
+		"NF_HOSTS", "NF_PLAN_ID",
 		"NORTHFLANK", "NORTHFLANK_SERVICE_ID", "NORTHFLANK_PROJECT_ID",
 		"NORTHFLANK_PUBLIC_URL", "NORTHFLANK_SERVICE_URL", "SERVICE_URL",
 	} {
@@ -572,23 +573,22 @@ func TestDetectNorthflank(t *testing.T) {
 		"KOYEB_APP_NAME", "KOYEB_PUBLIC_DOMAIN",
 		"CF_PAGES", "CF_PAGES_URL",
 		"ZEABUR", "ZEABUR_WEB_URL",
-		"NORTHFLANK", "NORTHFLANK_PUBLIC_URL", "NORTHFLANK_SERVICE_URL",
-		"NORTHFLANK_URL", "NORTHFLANK_HOST", "NORTHFLANK_PUBLIC_HOST",
-		"NORTHFLANK_SERVICE_HOST", "NORTHFLANK_DOMAIN", "NORTHFLANK_SERVICE_DOMAIN",
+		"NF_HOSTS", "NF_PLAN_ID",
 		"SERVICE_URL", "PUBLIC_URL",
 	} {
 		t.Setenv(key, "")
 	}
 
-	t.Setenv("NORTHFLANK_SERVICE_ID", "svc-123")
-	t.Setenv("NORTHFLANK_HOST", "https://p01--vless--abc.code.run")
+	t.Setenv("NF_PLAN_ID", "plan-123")
+	t.Setenv("NF_HOSTS", "https://p01--vless--abc.code.run, p01--vless--def.code.run")
 
 	if got := detectRuntime(); got != "northflank" {
 		t.Fatalf("runtime = %q, want northflank", got)
 	}
 	hosts := detectHosts()
-	if len(hosts) != 1 || hosts[0] != "p01--vless--abc.code.run" {
-		t.Fatalf("hosts = %v, want [p01--vless--abc.code.run]", hosts)
+	want := []string{"p01--vless--abc.code.run", "p01--vless--def.code.run"}
+	if len(hosts) != len(want) || hosts[0] != want[0] || hosts[1] != want[1] {
+		t.Fatalf("hosts = %v, want %v", hosts, want)
 	}
 }
 

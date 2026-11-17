@@ -78,8 +78,8 @@ stream-one 需要端到端支持双向流式传输（直连 TLS/REALITY 或 HTTP
 
 | 字段 | 来源 |
 | --- | --- |
-| `runtime` | `NODE_RUNTIME` / `RUNTIME`，否则根据 `VERCEL`、`RAILWAY_*`、`RENDER_*`、`FLY_APP_NAME`、`KOYEB_*`、`CF_PAGES*`、`ZEABUR*`、`NORTHFLANK_*` 自动判断 |
-| `hosts` | `PUBLIC_HOSTS`（逗号分隔）/ `PUBLIC_HOST`，否则读取平台分配的公网域名；Northflank 可用 `NORTHFLANK_PUBLIC_URL` / `NORTHFLANK_HOST` 等 |
+| `runtime` | `NODE_RUNTIME` / `RUNTIME`，否则根据 `VERCEL`、`RAILWAY_*`、`RENDER_*`、`FLY_APP_NAME`、`KOYEB_*`、`CF_PAGES*`、`ZEABUR*`、`NF_*` 自动判断 |
+| `hosts` | `PUBLIC_HOSTS`（逗号分隔）/ `PUBLIC_HOST`，否则读取平台分配的公网域名；Northflank 使用 `NF_HOSTS`（可逗号分隔多个） |
 
 只采集稳定的公网地址：Vercel 使用 `VERCEL_PROJECT_PRODUCTION_URL`（忽略每次部署变化的 `VERCEL_URL`）；
 Cloudflare Pages 不使用 `CF_PAGES_URL`（单次部署地址），请通过 `PUBLIC_HOST` 手动指定生产域名。
@@ -92,8 +92,8 @@ IP 查询默认请求 `https://ipinfo.io/json`，可用 `IP_LOOKUP_URL` 指向�
 在 **Vercel / Railway** 上不会启动 60 秒后台同步，只在冷启动时同步一次，
 避免空闲时持续请求让实例无法自动休眠。其他运行环境（包括 Northflank）仍按 60 秒刷新设备列表。
 
-Northflank 不会自动注入自身的 `*.code.run` 公网地址；部署时请把地址写入
-`NORTHFLANK_PUBLIC_URL`、`NORTHFLANK_HOST` 或通用的 `PUBLIC_HOST` / `PUBLIC_HOSTS`。
+Northflank 会注入 `NF_HOSTS`（可能包含多个逗号分隔的地址），直接读取即可；
+也可以用通用的 `PUBLIC_HOST` / `PUBLIC_HOSTS` 覆盖。
 
 ## 客户端
 

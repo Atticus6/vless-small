@@ -359,6 +359,16 @@ func (s *server) handleXHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf(
+		"xhttp request %s %s proto=%s ct=%q len=%d ua=%q",
+		r.Method,
+		r.URL.Path,
+		r.Proto,
+		r.Header.Get("Content-Type"),
+		r.ContentLength,
+		r.Header.Get("User-Agent"),
+	)
+
 	reader := bufio.NewReader(r.Body)
 	id, cmd, target, err := parseRequestStream(reader)
 	if err != nil {
@@ -372,6 +382,8 @@ func (s *server) handleXHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("xhttp open %s (cmd=%d) target=%s", r.RemoteAddr, cmd, target)
+
 	s.active.Add(1)
 	defer s.active.Add(-1)
 
@@ -382,7 +394,9 @@ func (s *server) handleXHTTP(w http.ResponseWriter, r *http.Request) {
 
 	flusher, _ := w.(http.Flusher)
 	if flusher != nil {
+		log.Printf("xhttp flush response headers")
 		flusher.Flush()
+		log.Printf("xhttp response headers flushed")
 	}
 	writer := &flushWriter{Writer: w, flusher: flusher}
 
@@ -946,7 +960,7 @@ func detectRuntime() string {
 		return "cloudflare"
 	case envSet("ZEABUR") || envSet("ZEABUR_WEB_URL"):
 		return "zeabur"
-	case envSet("NORTHFLANK") || envPrefixSet("NORTHFLANK_"):
+	case envPrefixSet("NF_"):
 		return "northflank"
 	default:
 		return "local"
@@ -958,7 +972,7 @@ func envSet(key string) bool {
 }
 
 // envPrefixSet 检查是否存在以 prefix 开头的环境变量。
-// Northflank 没有固定的运行 URL 变量，但会/可以由用户注入 NORTHFLANK_* 变量。
+// Northflank 会注入 NF_* 变量（如 NF_HOSTS、NF_PLAN_ID）用于识别平台。
 func envPrefixSet(prefix string) bool {
 	for _, entry := range os.Environ() {
 		if strings.HasPrefix(entry, prefix) {
@@ -984,6 +998,11 @@ func detectHosts() []string {
 		return normalizeHosts([]string{raw})
 	}
 
+	// Northflank 注入的 NF_HOSTS 可能包含多个地址，用逗号或空白分隔。
+	if raw := strings.TrimSpace(os.Getenv("NF_HOSTS")); raw != "" {
+		return normalizeHosts(strings.Fields(strings.ReplaceAll(raw, ",", " ")))
+	}
+
 	// 只使用稳定的公网地址：
 	// - 不用 VERCEL_URL：它是每次部署都会变化的 deployment URL；
 	// - 不用 CF_PAGES_URL：它同样指向单次部署，不是稳定生产域名。
@@ -994,15 +1013,6 @@ func detectHosts() []string {
 		os.Getenv("RENDER_EXTERNAL_URL"),
 		os.Getenv("KOYEB_PUBLIC_DOMAIN"),
 		os.Getenv("ZEABUR_WEB_URL"),
-		// Northflank 不注入自身 .code.run URL，通常由部署者手动设置这些变量。
-		os.Getenv("NORTHFLANK_PUBLIC_URL"),
-		os.Getenv("NORTHFLANK_SERVICE_URL"),
-		os.Getenv("NORTHFLANK_URL"),
-		os.Getenv("NORTHFLANK_HOST"),
-		os.Getenv("NORTHFLANK_PUBLIC_HOST"),
-		os.Getenv("NORTHFLANK_SERVICE_HOST"),
-		os.Getenv("NORTHFLANK_DOMAIN"),
-		os.Getenv("NORTHFLANK_SERVICE_DOMAIN"),
 		os.Getenv("SERVICE_URL"),
 		os.Getenv("PUBLIC_URL"),
 	}
