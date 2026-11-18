@@ -14,14 +14,20 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/atticus6/vless-small/internal/app"
+	"github.com/atticus6/vless-small/internal/cert"
+	"github.com/atticus6/vless-small/internal/tunnel"
 )
 
 // version 由 Release workflow 通过 -ldflags "-X main.version=<tag>" 注入；
-// 本地 go run/go build 时为 dev。
+// 本地 go run/go build 时为 dev。ldflags 只能设置 main 包变量，因此启动时
+// 再复制给 app.Version 供上报和 /healthz 使用。
 var version = "dev"
 
 func main() {
 	cfg := parseFlags()
+	app.Version = version
 
 	// 版本查询必须在配置校验之前：安装脚本用它确认二进制可执行。
 	if cfg.showVersion {
@@ -29,36 +35,30 @@ func main() {
 		return
 	}
 
-	nodeCfg, err := parseNodeConfig(cfg.controlPlane)
+	nodeCfg, err := app.ParseNodeConfig(cfg.controlPlane)
 	if err != nil {
 		log.Fatalf("invalid CONFIG: %v", err)
 	}
 
-	users, err := parseUsers(cfg.uuidList)
+	users, err := app.ParseUsers(cfg.uuidList)
 	if err != nil {
 		log.Fatalf("invalid users: %v", err)
 	}
-	if len(users) == 0 && nodeCfg.baseURL == "" {
+	if len(users) == 0 && nodeCfg.BaseURL == "" {
 		log.Fatal("missing -uuid (or UUID env) or -config (or CONFIG env)")
 	}
 
-	srv := newServer(users, cfg.wsPath)
-	srv.controlToken = nodeCfg.token
+	srv := app.NewServer(users, cfg.wsPath)
+	srv.SetControlToken(nodeCfg.Token)
 
-	handler := http.HandlerFunc(srv.handleHTTP)
-	tunnelCtl := newTunnelController(cfg.listen)
-	certCtl := newCertController(handler)
-	srv.tunnelStatus = tunnelCtl.Status
-	srv.certStatus = certCtl.Status
-	if nodeCfg.baseURL != "" {
-		certCtl.SetReporter(func(status certReport) {
-			reportCertState(nodeCfg, status)
-		})
-	}
+	handler := http.HandlerFunc(srv.HandleHTTP)
+	tunnelCtl := tunnel.New(cfg.listen)
+	certCtl := cert.New(handler)
+	srv.SetStatusProviders(tunnelCtl.Status, certCtl.Status)
 	defer tunnelCtl.Close()
 	defer certCtl.Close()
 
-	startNodeSync(cfg, nodeCfg, srv, users, tunnelCtl, certCtl)
+	app.StartNodeSync(cfg.listen, cfg.wsPath, nodeCfg, srv, users, tunnelCtl, certCtl)
 
 	httpServer := &http.Server{
 		Addr:              cfg.listen,
@@ -77,68 +77,17 @@ func main() {
 		defer cancel()
 		_ = httpServer.Shutdown(shutdownCtx)
 		// Shutdown 不跟踪 hijack 后的 WebSocket, 再给转发会话一段排空时间.
-		srv.waitDrain(5 * time.Second)
+		srv.WaitDrain(5 * time.Second)
 	}()
 
 	log.Printf(
 		"vless-ws listening on %s (path=%s, users=%d)",
-		cfg.listen, displayPath(cfg.wsPath), srv.userCount(),
+		cfg.listen, displayPath(cfg.wsPath), srv.UserCount(),
 	)
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 	<-shutdownDone
-}
-
-// startNodeSync 在配置了 CONFIG 时执行首次上报，并按平台决定是否后台轮询.
-func startNodeSync(
-	cfg config,
-	nodeCfg nodeConfig,
-	srv *server,
-	users map[[16]byte]struct{},
-	tunnelCtl tunnelController,
-	certCtl certController,
-) {
-	if nodeCfg.baseURL == "" {
-		return
-	}
-
-	info := collectNodeInfo()
-	log.Printf(
-		"node info runtime=%s hosts=%v ipv4=%s ipv6=%s country=%s tunnel=%v cert=%v",
-		info.runtime, info.hosts, info.ipv4, info.ipv6, info.countryCode,
-		tunnelSupported(), certCtl.Status().Supported,
-	)
-
-	tsnetCtl := newTSNetController(nodeCfg, tsnetHandler(srv))
-	result, err := syncDevices(
-		nodeCfg, srv, cfg.listen, cfg.wsPath, users, info,
-		tsnetCtl.IP(), tunnelCtl.Status(), certCtl.Status(),
-	)
-	if err != nil {
-		log.Printf("initial device sync failed: %v", err)
-	}
-	if result != nil {
-		tsnetCtl.Sync(result.Tsnet != nil && result.Tsnet.Enabled)
-		if result.Tunnel != nil {
-			tunnelCtl.Sync(result.Tunnel.Enabled)
-		}
-		if result.Cert != nil {
-			certCtl.Sync(result.Cert.Domain)
-		}
-		handleNodeUpdate(nodeCfg, result.Update)
-	}
-
-	// Vercel / Railway 无请求时会自动休眠；后台定时同步会产生持续请求，
-	// 让实例无法休眠。这两个平台只在冷启动时同步一次。
-	if isAutoSleepRuntime(info.runtime) {
-		log.Printf("runtime %s: background sync disabled (auto-sleep)", info.runtime)
-		return
-	}
-	go syncLoop(
-		nodeCfg, srv, cfg.listen, cfg.wsPath, users, info,
-		tsnetCtl, tunnelCtl, certCtl,
-	)
 }
 
 func displayPath(path string) string {

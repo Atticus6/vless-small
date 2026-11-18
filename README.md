@@ -7,28 +7,15 @@
 
 ## 代码结构
 
-| 文件 | 职责 |
+| 路径 | 职责 |
 | --- | --- |
-| `main.go` | 启动流程、节点同步调度、优雅退出 |
+| `main.go` | 组装 `app`/`tunnel`/`cert`，启动 HTTP 服务与优雅退出 |
 | `config.go` | 命令行/环境变量解析、路径规范化 |
-| `server.go` | 服务器状态、用户表、健康检查、WS 处理 |
-| `websocket.go` | WebSocket 握手、TCP/UDP 转发、心跳 |
-| `protocol.go` | VLESS 请求头解析（内存缓冲） |
-| `node.go` | CONFIG 解析、节点上报、设备同步 |
-| `push.go` | 主控新建设备后的即时设备列表推送 |
-| `update.go` | 版本比较、自更新下载、sha256 校验与原子替换 |
-| `tsnet_common.go` | tsnet 开关类型、hostname 清洗与控制器接口 |
-| `tsnet_impl.go` | 非 Vercel 构建的 tsnet 实现：状态拉取/回写、tailnet 监听 |
-| `tsnet_stub.go` | Vercel 构建的空实现（`-tags vercel`，不编译 tsnet） |
-| `tunnel_common.go` | 临时隧道开关、上报结构与本地端口解析 |
-| `tunnel_impl.go` | 非 Vercel 构建：内嵌 cloudflared，申请并运行临时隧道 |
-| `tunnel_stub.go` | Vercel 构建的空实现（`-tags vercel`，不编译 cloudflared） |
-| `cert_common.go` | 自动证书开关/状态与控制器接口 |
-| `cert_impl.go` | Linux 非 Vercel：ACME 证书申请，监听 80/443 提供 TLS |
-| `cert_stub.go` | Vercel/非 Linux 构建的空实现 |
-| `platform.go` | 运行时识别、公网 hosts、IP/地理位置查询 |
-| `users.go` | UUID 列表解析 |
-| `constants.go` | 协议、超时与默认路径常量 |
+| `internal/app/` | 核心服务：`server.go`（用户表、健康检查）、`websocket.go`、`protocol.go`、`node.go`（CONFIG、上报、设备同步）、`push.go`、`update.go`、`platform.go`、`users.go`、`constants.go` |
+| `internal/tsnet/` | 内嵌 Tailscale：`tsnet_common.go`、`tsnet_impl.go`、`tsnet_stub.go` |
+| `internal/tunnel/` | 内嵌 cloudflared 临时隧道：`tunnel_common.go`、`tunnel_impl.go`、`tunnel_stub.go` |
+| `internal/cert/` | ACME 自动证书：`cert_common.go`、`cert_impl.go`、`cert_stub.go` |
+| `internal/platform/` | 运行平台识别（local / Vercel / Railway / Northflank 等） |
 | `version.txt` | 当前版本号，Release workflow 唯一版本来源 |
 | `install.sh` | 一键安装脚本，作为 Release 资产发布 |
 | `uninstall.sh` | 独立卸载脚本，作为 Release 资产发布 |
