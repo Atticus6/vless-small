@@ -61,24 +61,34 @@ type nodeReportResponse struct {
 	Devices []nodeDevice `json:"devices"`
 	// Update 只在主控为该节点设置了目标版本、且节点版本落后时出现。
 	Update *nodeUpdate `json:"update,omitempty"`
+	// Tsnet 是主控下发的内嵌 Tailscale 开关；nil 视为关闭。
+	Tsnet *tsnetSignal `json:"tsnet,omitempty"`
+}
+
+// nodeSyncResult 汇总一次上报拿到的控制指令。
+type nodeSyncResult struct {
+	Update *nodeUpdate
+	Tsnet  *tsnetSignal
 }
 
 var syncHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 type nodeReport struct {
-	Name        string   `json:"name"`
-	Runtime     string   `json:"runtime"`
-	Version     string   `json:"version,omitempty"`
-	OS          string   `json:"os,omitempty"`
-	Arch        string   `json:"arch,omitempty"`
-	Listen      string   `json:"listen,omitempty"`
-	Path        string   `json:"path,omitempty"`
-	Hosts       []string `json:"hosts,omitempty"`
-	IPv4        string   `json:"ipv4,omitempty"`
-	IPv6        string   `json:"ipv6,omitempty"`
-	CountryCode string   `json:"countryCode,omitempty"`
-	Latitude    *float64 `json:"latitude,omitempty"`
-	Longitude   *float64 `json:"longitude,omitempty"`
+	Name           string   `json:"name"`
+	Runtime        string   `json:"runtime"`
+	Version        string   `json:"version,omitempty"`
+	OS             string   `json:"os,omitempty"`
+	Arch           string   `json:"arch,omitempty"`
+	TsnetSupported bool     `json:"tsnetSupported"`
+	TsnetIP        string   `json:"tsnetIp"`
+	Listen         string   `json:"listen,omitempty"`
+	Path           string   `json:"path,omitempty"`
+	Hosts          []string `json:"hosts,omitempty"`
+	IPv4           string   `json:"ipv4,omitempty"`
+	IPv6           string   `json:"ipv6,omitempty"`
+	CountryCode    string   `json:"countryCode,omitempty"`
+	Latitude       *float64 `json:"latitude,omitempty"`
+	Longitude      *float64 `json:"longitude,omitempty"`
 }
 
 // collectNodeInfo 汇总平台信息与本机公网 IP/地理位置.
@@ -114,43 +124,54 @@ func syncLoop(
 	listen, path string,
 	static map[[16]byte]struct{},
 	info nodeInfo,
+	tsnetCtl tsnetController,
 ) {
 	ticker := time.NewTicker(nodeSyncInterval)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		update, err := syncDevices(cfg, srv, listen, path, static, info)
+		result, err := syncDevices(
+			cfg, srv, listen, path, static, info, tsnetCtl.IP(),
+		)
 		if err != nil {
 			log.Printf("device sync failed: %v", err)
 			continue
 		}
-		handleNodeUpdate(cfg, update)
+		if result == nil {
+			continue
+		}
+
+		tsnetCtl.Sync(result.Tsnet != nil && result.Tsnet.Enabled)
+		handleNodeUpdate(cfg, result.Update)
 	}
 }
 
 // syncDevices 向主控上报节点信息, 把返回的所有启用设备设为可认证 UUID,
-// 并返回主控下发的更新指令（如果有）.
+// 并返回主控下发的更新指令与 tsnet 开关.
 func syncDevices(
 	cfg nodeConfig,
 	srv *server,
 	listen, path string,
 	static map[[16]byte]struct{},
 	info nodeInfo,
-) (*nodeUpdate, error) {
+	tsnetIP string,
+) (*nodeSyncResult, error) {
 	payload, err := json.Marshal(nodeReport{
-		Name:        cfg.name,
-		Runtime:     info.runtime,
-		Version:     version,
-		OS:          runtime.GOOS,
-		Arch:        runtimeAssetArch(),
-		Listen:      listen,
-		Path:        path,
-		Hosts:       info.hosts,
-		IPv4:        info.ipv4,
-		IPv6:        info.ipv6,
-		CountryCode: info.countryCode,
-		Latitude:    info.latitude,
-		Longitude:   info.longitude,
+		Name:           cfg.name,
+		Runtime:        info.runtime,
+		Version:        version,
+		OS:             runtime.GOOS,
+		Arch:           runtimeAssetArch(),
+		TsnetSupported: tsnetSupported(),
+		TsnetIP:        tsnetIP,
+		Listen:         listen,
+		Path:           path,
+		Hosts:          info.hosts,
+		IPv4:           info.ipv4,
+		IPv6:           info.ipv6,
+		CountryCode:    info.countryCode,
+		Latitude:       info.latitude,
+		Longitude:      info.longitude,
 	})
 	if err != nil {
 		return nil, err
@@ -197,5 +218,5 @@ func syncDevices(
 
 	srv.setUsers(users)
 	log.Printf("synced %d devices from %s", len(users), cfg.baseURL)
-	return result.Update, nil
+	return &nodeSyncResult{Update: result.Update, Tsnet: result.Tsnet}, nil
 }

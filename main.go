@@ -90,11 +90,18 @@ func startNodeSync(cfg config, nodeCfg nodeConfig, srv *server, users map[[16]by
 		"node info runtime=%s hosts=%v ipv4=%s ipv6=%s country=%s",
 		info.runtime, info.hosts, info.ipv4, info.ipv6, info.countryCode,
 	)
-	update, err := syncDevices(nodeCfg, srv, cfg.listen, cfg.wsPath, users, info)
+
+	tsnetCtl := newTSNetController(nodeCfg, tsnetHandler(srv))
+	result, err := syncDevices(
+		nodeCfg, srv, cfg.listen, cfg.wsPath, users, info, tsnetCtl.IP(),
+	)
 	if err != nil {
 		log.Printf("initial device sync failed: %v", err)
 	}
-	handleNodeUpdate(nodeCfg, update)
+	if result != nil {
+		tsnetCtl.Sync(result.Tsnet != nil && result.Tsnet.Enabled)
+		handleNodeUpdate(nodeCfg, result.Update)
+	}
 
 	// Vercel / Railway 无请求时会自动休眠；后台定时同步会产生持续请求，
 	// 让实例无法休眠。这两个平台只在冷启动时同步一次。
@@ -102,7 +109,7 @@ func startNodeSync(cfg config, nodeCfg nodeConfig, srv *server, users map[[16]by
 		log.Printf("runtime %s: background sync disabled (auto-sleep)", info.runtime)
 		return
 	}
-	go syncLoop(nodeCfg, srv, cfg.listen, cfg.wsPath, users, info)
+	go syncLoop(nodeCfg, srv, cfg.listen, cfg.wsPath, users, info, tsnetCtl)
 }
 
 func displayPath(path string) string {

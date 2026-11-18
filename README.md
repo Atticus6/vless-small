@@ -18,6 +18,9 @@
 | `protocol.go` | VLESS 请求头解析（内存缓冲与流式两种） |
 | `node.go` | CONFIG 解析、节点上报、设备同步 |
 | `update.go` | 版本比较、自更新下载、sha256 校验与原子替换 |
+| `tsnet_common.go` | tsnet 开关类型、hostname 清洗与控制器接口 |
+| `tsnet_impl.go` | 非 Vercel 构建的 tsnet 实现：状态拉取/回写、tailnet 监听 |
+| `tsnet_stub.go` | Vercel 构建的空实现（`-tags vercel`，不编译 tsnet） |
 | `platform.go` | 运行时识别、公网 hosts、IP/地理位置查询 |
 | `users.go` | UUID 列表解析 |
 | `constants.go` | 协议、超时与默认路径常量 |
@@ -159,6 +162,34 @@ docker run -d --restart=always --name vless-small \
 镜像，之后 Web 按钮才会生效。SaaS 自动休眠运行时（Vercel/Railway）不会后台
 轮询，Web 会拒绝下发。
 
+## Tailscale（tsnet）
+
+非 Vercel 构建内置 [tsnet](https://tailscale.com/kb/1244/tsnet)，节点会作为一台
+Tailscale 设备自动加入 tailnet。Vercel 构建使用 `-tags vercel`，完全不编译
+tsnet（`vercel.json` 的 `buildCommand` 已加该 tag）。
+
+自动加入条件（三条同时满足，主控每次上报重新判断）：
+
+1. 节点二进制包含 tsnet（`tsnetSupported=true`，即非 Vercel 构建）；
+2. 运行时长期驻留（Vercel / Railway 会自动休眠，不加入）；
+3. Web 已配置 Tailscale API token（设置页），可签发 auth key。
+
+满足后主控在 `/api/nodes/report` 响应里返回 `tsnet.enabled=true`；节点随即：
+
+1. `GET /api/nodes/tsnet?name=...`（Bearer name+token）拉取 auth key、
+   `tailscaled.state`、`tailscaled.log.conf`；
+2. 把这些文件恢复到临时状态目录，以清洗后的节点名作为 hostname 启动 tsnet；
+3. 在 tailnet 上监听 `:8080`，复用同一个 HTTP handler（健康检查/WS）；
+4. 启动后和每 5 分钟把状态文件变化 `PUT /api/nodes/tsnet` 回写主控。
+
+主控把状态存在 D1 的 `vless_tsnet_state` 表（base64），因此实例/容器重建后
+仍复用同一台 Tailscale 设备，不会反复注册新设备。条件不再满足（例如删除
+Tailscale API token）时，节点在下次上报后停止 tsnet；Tailscale 控制台里的
+设备记录不会自动删除，需要手动清理。
+
+> tsnet 使用用户态网络栈，tailnet IP 上的服务由内嵌 listener 提供，不会自动
+> 暴露公网 `:8080`；公网入口仍走原有的 TLS 反向代理。
+
 ## XHTTP
 
 XHTTP 默认启用，路径为 `/xhttp`，支持两种模式：
@@ -221,6 +252,8 @@ stream-one 需要端到端支持双向流式传输（直连 TLS/REALITY 或 HTTP
 | --- | --- |
 | `version` | 构建时通过 `-ldflags -X main.version` 注入的 Release 版本；本地构建为 `dev` |
 | `os` / `arch` | `runtime.GOOS` 与 Release 资产架构（amd64/arm64/armv6/armv7，32 位 ARM 来自 `GOARM`） |
+| `tsnetSupported` | 当前二进制是否包含 tsnet；Vercel 构建为 `false` |
+| `tsnetIp` | 内嵌 Tailscale 连接成功后上报的 tailnet IPv4 |
 | `runtime` | `NODE_RUNTIME` / `RUNTIME`，否则根据 `VERCEL`、`RAILWAY_*`、`RENDER_*`、`FLY_APP_NAME`、`KOYEB_*`、`CF_PAGES*`、`ZEABUR*`、`NF_*` 自动判断 |
 | `hosts` | `PUBLIC_HOSTS`（逗号分隔）/ `PUBLIC_HOST`，否则读取平台分配的公网域名；Northflank 使用 `NF_HOSTS` |
 

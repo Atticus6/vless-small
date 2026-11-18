@@ -491,7 +491,7 @@ func TestSyncDevices(t *testing.T) {
 		}
 		gotAuth = r.Header.Get("Authorization")
 
-		var body map[string]string
+		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Errorf("decode report: %v", err)
 			return
@@ -500,10 +500,13 @@ func TestSyncDevices(t *testing.T) {
 			t.Errorf("report body = %#v", body)
 		}
 		if body["version"] != version {
-			t.Errorf("report version = %q, want %q", body["version"], version)
+			t.Errorf("report version = %v, want %q", body["version"], version)
 		}
 		if body["os"] == "" || body["arch"] == "" {
 			t.Errorf("report os/arch missing: %#v", body)
+		}
+		if body["tsnetSupported"] != tsnetSupported() {
+			t.Errorf("report tsnetSupported = %v, want %v", body["tsnetSupported"], tsnetSupported())
 		}
 
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -524,12 +527,14 @@ func TestSyncDevices(t *testing.T) {
 	cfg := nodeConfig{baseURL: ts.URL, name: "hk", token: "secret"}
 	static := map[[16]byte]struct{}{staticID: {}}
 
-	update, err := syncDevices(cfg, srv, ":8080", "/ws", static, nodeInfo{runtime: "vless-small"})
+	result, err := syncDevices(
+		cfg, srv, ":8080", "/ws", static, nodeInfo{runtime: "vless-small"}, "",
+	)
 	if err != nil {
 		t.Fatalf("syncDevices: %v", err)
 	}
-	if update == nil || update.Version != "v9.9.9" {
-		t.Fatalf("update = %#v, want v9.9.9", update)
+	if result == nil || result.Update == nil || result.Update.Version != "v9.9.9" {
+		t.Fatalf("result = %#v, want update v9.9.9", result)
 	}
 	if gotAuth != "Bearer secret" {
 		t.Fatalf("authorization = %q", gotAuth)
