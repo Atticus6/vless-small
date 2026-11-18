@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # 构建阶段跑在原生平台, 通过 GOOS/GOARCH 交叉编译目标架构, 多架构构建不走 QEMU.
-FROM --platform=$BUILDPLATFORM golang:1.26.7-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
