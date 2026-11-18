@@ -16,6 +16,11 @@ type server struct {
 	upgrader  websocket.Upgrader
 	active    atomic.Int64
 	startedAt time.Time
+
+	// controlToken 是 CONFIG 里的节点 token，用于主控推送设备列表。
+	controlToken string
+	// staticUsers 是 -uuid/环境变量提供的固定 UUID；推送时始终保留。
+	staticUsers map[[16]byte]struct{}
 }
 
 type healthResponse struct {
@@ -26,13 +31,17 @@ type healthResponse struct {
 
 func newServer(users map[[16]byte]struct{}, path string) *server {
 	s := &server{
-		path:      path,
-		startedAt: time.Now(),
+		path:        path,
+		startedAt:   time.Now(),
+		staticUsers: make(map[[16]byte]struct{}, len(users)),
 		upgrader: websocket.Upgrader{
 			CheckOrigin:     func(*http.Request) bool { return true },
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
 		},
+	}
+	for id := range users {
+		s.staticUsers[id] = struct{}{}
 	}
 	s.setUsers(users)
 	return s
@@ -62,8 +71,11 @@ func (s *server) userCount() int {
 	return len(*users)
 }
 
-// handleHTTP 处理 WebSocket 请求.
+// handleHTTP 处理 WebSocket 请求；POST WS 路径也用于主控设备推送.
 func (s *server) handleHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.handleDevicePush(w, r) {
+		return
+	}
 	s.handleWS(w, r)
 }
 

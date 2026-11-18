@@ -17,8 +17,9 @@ on:
       - "**/*.go"
       - "go.mod"
       - "go.sum"
-      # install.sh 会作为 Release 资产发布，改了需要重新生成 release。
+      # install.sh / uninstall.sh 会作为 Release 资产发布，改了需要重新生成 release。
       - "install.sh"
+      - "uninstall.sh"
       # 手动调整版本号时也允许触发一次发布。
       - "version.txt"
   # 只改文档/工作流但需要补一次发布时，可手动触发。
@@ -175,13 +176,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          # install.sh 也作为资产发布，README 里的 latest/download/install.sh
-          # 才能稳定可用，不受默认分支变化影响。
-          cp install.sh dist/
+          # install.sh / uninstall.sh 也作为资产发布，README 里的
+          # latest/download/* 才能稳定可用，不受默认分支变化影响。
+          cp install.sh uninstall.sh dist/
           cd dist
           # 这里刻意使用裸文件名（不带 ./ 前缀），install.sh 与节点更新都按第二列精确匹配。
           # vless-small_* 同时匹配 tar.gz 和原始二进制。
-          sha256sum vless-small_* install.sh > checksums.txt
+          sha256sum vless-small_* install.sh uninstall.sh > checksums.txt
           cat checksums.txt
 
       - name: Publish Release

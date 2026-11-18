@@ -15,6 +15,7 @@
 | `websocket.go` | WebSocket 握手、TCP/UDP 转发、心跳 |
 | `protocol.go` | VLESS 请求头解析（内存缓冲） |
 | `node.go` | CONFIG 解析、节点上报、设备同步 |
+| `push.go` | 主控新建设备后的即时设备列表推送 |
 | `update.go` | 版本比较、自更新下载、sha256 校验与原子替换 |
 | `tsnet_common.go` | tsnet 开关类型、hostname 清洗与控制器接口 |
 | `tsnet_impl.go` | 非 Vercel 构建的 tsnet 实现：状态拉取/回写、tailnet 监听 |
@@ -24,6 +25,7 @@
 | `constants.go` | 协议、超时与默认路径常量 |
 | `version.txt` | 当前版本号，Release workflow 唯一版本来源 |
 | `install.sh` | 一键安装脚本，作为 Release 资产发布 |
+| `uninstall.sh` | 独立卸载脚本，作为 Release 资产发布 |
 | `.github/workflows/release.yml` | push 触发的多平台构建与 GitHub Release |
 
 ## 运行
@@ -49,8 +51,9 @@ go run . -uuid 14725836-1234-5678-9abc-def012345678 -listen :8080 -path /ws
 
 ## 一键安装
 
-版本号以 `version.txt` 为准。push 命中 Go 源码、`go.mod`/`go.sum`、`install.sh`
-或 `version.txt` 时触发 GitHub Actions（`.github/workflows/release.yml`）：
+版本号以 `version.txt` 为准。push 命中 Go 源码、`go.mod`/`go.sum`、
+`install.sh`、`uninstall.sh` 或 `version.txt` 时触发 GitHub Actions
+（`.github/workflows/release.yml`）：
 
 1. 读取 `version.txt`，把最后一段数字 +1 作为本次版本号
    （`v0.1.0` → `v0.1.1`，`1` → `2`）；
@@ -69,10 +72,10 @@ go run . -uuid 14725836-1234-5678-9abc-def012345678 -listen :8080 -path /ws
 ```bash
 NODE_NAME='hk-01'; NODE_TOKEN='<node token>'; \
   curl -fsSL -H "Authorization: Bearer $NODE_TOKEN" -H "X-Node-Name: $NODE_NAME" \
-    "https://dsh.example.com/api/releases/v0.1.2/install.sh" \
+    "https://dsh.example.com/api/releases/<version>/install.sh" \
   | sudo bash -s -- --config "https://dsh.example.com_hk-01_<node token>" \
-      --version v0.1.2 \
-      --download-base "https://dsh.example.com/api/releases/v0.1.2" --path /ws
+      --version <version> \
+      --download-base "https://dsh.example.com/api/releases/<version>" --path /ws
 ```
 
 直接点页面上的“复制安装命令”即可，版本会自动取当前最新 Release。
@@ -123,6 +126,24 @@ systemctl status vless-small
 journalctl -u vless-small -f
 vless-small -version   # 查看已安装版本
 ```
+
+## 卸载
+
+Release 同时发布 `uninstall.sh`。系统级安装用 root 执行：
+
+```bash
+sudo bash uninstall.sh
+
+# 或通过主控代理下载（使用节点的 CONFIG token）
+curl -fsSL -H "Authorization: Bearer <node token>" \
+  -H "X-Node-Name: <name>" \
+  "https://dsh.example.com/api/releases/<version>/uninstall.sh" | sudo bash
+```
+
+脚本会停止/禁用并删除 systemd 服务、`/etc/vless-small`、`/opt/vless-small`
+和 `/usr/local/bin/vless-small` 符号链接；`--docker` 额外删除名为
+`vless-small` 的容器，`--keep-user` 保留服务用户，`--install-dir` 用于
+非默认目录。`install.sh --uninstall` 仍然可用。
 
 > 本服务不内置 TLS。生产环境请放在 Nginx / Caddy / Cloudflare 之后，并配置
 > WebSocket Upgrade 与较长的读超时；订阅默认使用 443 + `/ws`。
@@ -234,6 +255,14 @@ IP 查询默认请求 `https://ipinfo.io/json`，可用 `IP_LOOKUP_URL` 指向�
 
 Northflank 会注入 `NF_HOSTS`（可能包含多个逗号分隔的地址），直接读取即可；
 也可以用通用的 `PUBLIC_HOST` / `PUBLIC_HOSTS` 覆盖。
+
+> 节点端始终拉取**全量启用设备 UUID**。Web 的用户/设备节点授权只影响订阅里
+> 包含哪些节点，不会缩小节点端的 UUID 列表，因此授权变化不需要通知每个节点。
+
+新建设备时主控会尝试 `POST <WS_PATH>`（Bearer CONFIG token）把完整设备列表
+推给已上报公网地址的节点，让新 UUID 立即生效；Vercel 运行时是无状态实例，
+主控会跳过（这类节点只在冷启动上报时同步）。节点仍按 60 秒周期拉取全量列表。
+反向代理需要允许该 WS 路径上的 POST，推送失败不影响设备创建。
 
 ## 客户端
 

@@ -43,6 +43,7 @@ func main() {
 	}
 
 	srv := newServer(users, cfg.wsPath)
+	srv.controlToken = nodeCfg.token
 	startNodeSync(cfg, nodeCfg, srv, users)
 
 	httpServer := &http.Server{
