@@ -30,14 +30,8 @@ type certController interface {
 
 // certRuntimeAllowed 判断平台运行时是否允许直接绑定 80/443。
 //
-// 托管容器/PaaS 的端口由平台转发，节点进程通常不能自行监听低端口；
-// 即使容器检测漏判，也不在这些运行时上启动 ACME。
+// 只有显式识别为 local 的纯 Linux 环境允许；所有托管容器/PaaS
+// （Northflank、Vercel、Railway 等）即使是常驻容器也不启用 ACME。
 func certRuntimeAllowed(runtime string) bool {
-	switch strings.ToLower(strings.TrimSpace(runtime)) {
-	case "vercel", "railway", "render", "fly", "koyeb", "cloudflare",
-		"zeabur", "northflank":
-		return false
-	default:
-		return true
-	}
+	return strings.ToLower(strings.TrimSpace(runtime)) == "local"
 }

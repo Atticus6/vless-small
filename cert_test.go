@@ -18,6 +18,8 @@ func TestCertControllerDisabledNoop(t *testing.T) {
 
 func TestCertRuntimeAllowed(t *testing.T) {
 	for _, runtime := range []string{
+		"northflank",
+		"NORTHFLANK",
 		"vercel",
 		"railway",
 		"render",
@@ -25,15 +27,16 @@ func TestCertRuntimeAllowed(t *testing.T) {
 		"koyeb",
 		"cloudflare",
 		"zeabur",
-		"northflank",
-		"NORTHFLANK",
+		"",
+		"linux",
+		"unknown",
 	} {
 		if certRuntimeAllowed(runtime) {
 			t.Fatalf("certRuntimeAllowed(%q) = true, want false", runtime)
 		}
 	}
 
-	for _, runtime := range []string{"", "local", "linux", "unknown"} {
+	for _, runtime := range []string{"local", "LOCAL", " local "} {
 		if !certRuntimeAllowed(runtime) {
 			t.Fatalf("certRuntimeAllowed(%q) = false, want true", runtime)
 		}

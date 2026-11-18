@@ -258,9 +258,9 @@ Go 依赖直接编译进进程，节点会向 `api.trycloudflare.com` 申请一�
 
 限制：
 
-- 仅 **纯 Linux 非 Docker** 环境；Docker/Podman/Kubernetes 以及
-  Vercel/Railway/Render/Fly/Koyeb/Cloudflare/Zeabur/Northflank 等托管容器
-  运行时都不支持，会在上报中返回 `cert.supported=false`。Vercel 构建
+- 仅 **`runtime=local` 的纯 Linux 非 Docker** 环境；Northflank、Vercel、
+  Railway、Render、Fly、Koyeb、Cloudflare、Zeabur 等托管容器/PaaS 运行时
+  都不支持，会在上报中返回 `cert.supported=false`。Vercel 构建
   （`-tags vercel`）完全剔除证书代码。
 - 域名必须解析到该节点，且公网能访问 80/443。
 - 安装脚本生成的 systemd 服务已加入 `CAP_NET_BIND_SERVICE`，服务用户可绑定
