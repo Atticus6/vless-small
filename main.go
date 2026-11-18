@@ -44,7 +44,9 @@ func main() {
 
 	srv := newServer(users, cfg.wsPath)
 	srv.controlToken = nodeCfg.token
-	startNodeSync(cfg, nodeCfg, srv, users)
+	tunnelCtl := newTunnelController(cfg.listen)
+	defer tunnelCtl.Close()
+	startNodeSync(cfg, nodeCfg, srv, users, tunnelCtl)
 
 	httpServer := &http.Server{
 		Addr:              cfg.listen,
@@ -77,26 +79,37 @@ func main() {
 }
 
 // startNodeSync 在配置了 CONFIG 时执行首次上报，并按平台决定是否后台轮询.
-func startNodeSync(cfg config, nodeCfg nodeConfig, srv *server, users map[[16]byte]struct{}) {
+func startNodeSync(
+	cfg config,
+	nodeCfg nodeConfig,
+	srv *server,
+	users map[[16]byte]struct{},
+	tunnelCtl tunnelController,
+) {
 	if nodeCfg.baseURL == "" {
 		return
 	}
 
 	info := collectNodeInfo()
 	log.Printf(
-		"node info runtime=%s hosts=%v ipv4=%s ipv6=%s country=%s",
+		"node info runtime=%s hosts=%v ipv4=%s ipv6=%s country=%s tunnel=%v",
 		info.runtime, info.hosts, info.ipv4, info.ipv6, info.countryCode,
+		tunnelSupported(),
 	)
 
 	tsnetCtl := newTSNetController(nodeCfg, tsnetHandler(srv))
 	result, err := syncDevices(
-		nodeCfg, srv, cfg.listen, cfg.wsPath, users, info, tsnetCtl.IP(),
+		nodeCfg, srv, cfg.listen, cfg.wsPath, users, info,
+		tsnetCtl.IP(), tunnelCtl.Status(),
 	)
 	if err != nil {
 		log.Printf("initial device sync failed: %v", err)
 	}
 	if result != nil {
 		tsnetCtl.Sync(result.Tsnet != nil && result.Tsnet.Enabled)
+		if result.Tunnel != nil {
+			tunnelCtl.Sync(result.Tunnel.Enabled)
+		}
 		handleNodeUpdate(nodeCfg, result.Update)
 	}
 
@@ -106,7 +119,7 @@ func startNodeSync(cfg config, nodeCfg nodeConfig, srv *server, users map[[16]by
 		log.Printf("runtime %s: background sync disabled (auto-sleep)", info.runtime)
 		return
 	}
-	go syncLoop(nodeCfg, srv, cfg.listen, cfg.wsPath, users, info, tsnetCtl)
+	go syncLoop(nodeCfg, srv, cfg.listen, cfg.wsPath, users, info, tsnetCtl, tunnelCtl)
 }
 
 func displayPath(path string) string {

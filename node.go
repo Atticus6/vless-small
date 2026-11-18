@@ -63,32 +63,36 @@ type nodeReportResponse struct {
 	Update *nodeUpdate `json:"update,omitempty"`
 	// Tsnet 是主控下发的内嵌 Tailscale 开关；nil 视为关闭。
 	Tsnet *tsnetSignal `json:"tsnet,omitempty"`
+	// Tunnel 是主控下发的临时 cloudflared 隧道开关；nil 视为不改变。
+	Tunnel *tunnelSignal `json:"tunnel,omitempty"`
 }
 
 // nodeSyncResult 汇总一次上报拿到的控制指令。
 type nodeSyncResult struct {
 	Update *nodeUpdate
 	Tsnet  *tsnetSignal
+	Tunnel *tunnelSignal
 }
 
 var syncHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 type nodeReport struct {
-	Name           string   `json:"name"`
-	Runtime        string   `json:"runtime"`
-	Version        string   `json:"version,omitempty"`
-	OS             string   `json:"os,omitempty"`
-	Arch           string   `json:"arch,omitempty"`
-	TsnetSupported bool     `json:"tsnetSupported"`
-	TsnetIP        string   `json:"tsnetIp"`
-	Listen         string   `json:"listen,omitempty"`
-	Path           string   `json:"path,omitempty"`
-	Hosts          []string `json:"hosts,omitempty"`
-	IPv4           string   `json:"ipv4,omitempty"`
-	IPv6           string   `json:"ipv6,omitempty"`
-	CountryCode    string   `json:"countryCode,omitempty"`
-	Latitude       *float64 `json:"latitude,omitempty"`
-	Longitude      *float64 `json:"longitude,omitempty"`
+	Name           string       `json:"name"`
+	Runtime        string       `json:"runtime"`
+	Version        string       `json:"version,omitempty"`
+	OS             string       `json:"os,omitempty"`
+	Arch           string       `json:"arch,omitempty"`
+	TsnetSupported bool         `json:"tsnetSupported"`
+	TsnetIP        string       `json:"tsnetIp"`
+	Tunnel         tunnelReport `json:"tunnel"`
+	Listen         string       `json:"listen,omitempty"`
+	Path           string       `json:"path,omitempty"`
+	Hosts          []string     `json:"hosts,omitempty"`
+	IPv4           string       `json:"ipv4,omitempty"`
+	IPv6           string       `json:"ipv6,omitempty"`
+	CountryCode    string       `json:"countryCode,omitempty"`
+	Latitude       *float64     `json:"latitude,omitempty"`
+	Longitude      *float64     `json:"longitude,omitempty"`
 }
 
 // collectNodeInfo 汇总平台信息与本机公网 IP/地理位置.
@@ -125,13 +129,14 @@ func syncLoop(
 	static map[[16]byte]struct{},
 	info nodeInfo,
 	tsnetCtl tsnetController,
+	tunnelCtl tunnelController,
 ) {
 	ticker := time.NewTicker(nodeSyncInterval)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		result, err := syncDevices(
-			cfg, srv, listen, path, static, info, tsnetCtl.IP(),
+			cfg, srv, listen, path, static, info, tsnetCtl.IP(), tunnelCtl.Status(),
 		)
 		if err != nil {
 			log.Printf("device sync failed: %v", err)
@@ -142,12 +147,15 @@ func syncLoop(
 		}
 
 		tsnetCtl.Sync(result.Tsnet != nil && result.Tsnet.Enabled)
+		if result.Tunnel != nil {
+			tunnelCtl.Sync(result.Tunnel.Enabled)
+		}
 		handleNodeUpdate(cfg, result.Update)
 	}
 }
 
 // syncDevices 向主控上报节点信息, 把返回的所有启用设备设为可认证 UUID,
-// 并返回主控下发的更新指令与 tsnet 开关.
+// 并返回主控下发的更新指令、tsnet 与 tunnel 开关.
 func syncDevices(
 	cfg nodeConfig,
 	srv *server,
@@ -155,6 +163,7 @@ func syncDevices(
 	static map[[16]byte]struct{},
 	info nodeInfo,
 	tsnetIP string,
+	tunnel tunnelReport,
 ) (*nodeSyncResult, error) {
 	payload, err := json.Marshal(nodeReport{
 		Name:           cfg.name,
@@ -164,6 +173,7 @@ func syncDevices(
 		Arch:           runtimeAssetArch(),
 		TsnetSupported: tsnetSupported(),
 		TsnetIP:        tsnetIP,
+		Tunnel:         tunnel,
 		Listen:         listen,
 		Path:           path,
 		Hosts:          info.hosts,
@@ -218,5 +228,5 @@ func syncDevices(
 
 	srv.setUsers(users)
 	log.Printf("synced %d devices from %s", len(users), cfg.baseURL)
-	return &nodeSyncResult{Update: result.Update, Tsnet: result.Tsnet}, nil
+	return &nodeSyncResult{Update: result.Update, Tsnet: result.Tsnet, Tunnel: result.Tunnel}, nil
 }

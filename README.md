@@ -20,6 +20,9 @@
 | `tsnet_common.go` | tsnet 开关类型、hostname 清洗与控制器接口 |
 | `tsnet_impl.go` | 非 Vercel 构建的 tsnet 实现：状态拉取/回写、tailnet 监听 |
 | `tsnet_stub.go` | Vercel 构建的空实现（`-tags vercel`，不编译 tsnet） |
+| `tunnel_common.go` | 临时隧道开关、上报结构与本地端口解析 |
+| `tunnel_impl.go` | 非 Vercel 构建：内嵌 cloudflared，申请并运行临时隧道 |
+| `tunnel_stub.go` | Vercel 构建的空实现（`-tags vercel`，不编译 cloudflared） |
 | `platform.go` | 运行时识别、公网 hosts、IP/地理位置查询 |
 | `users.go` | UUID 列表解析 |
 | `constants.go` | 协议、超时与默认路径常量 |
@@ -212,6 +215,29 @@ Tailscale API token）时，节点在下次上报后停止 tsnet；Tailscale 控
 > tsnet 使用用户态网络栈，tailnet IP 上的服务由内嵌 listener 提供，不会自动
 > 暴露公网 `:8080`；公网入口仍走原有的 TLS 反向代理。
 
+## 临时隧道（cloudflared）
+
+非 Vercel 构建把 [cloudflared](https://github.com/cloudflare/cloudflared) 作为
+Go 依赖直接编译进进程，节点会向 `api.trycloudflare.com` 申请一个 Quick Tunnel，
+无需在机器上单独安装 cloudflared。
+
+- 主控的“VLESS 管理 → 临时隧道”按节点开关，默认开启；节点在每次上报
+  （≤60 秒）时读取 `tunnel.enabled`，启动/停止内置隧道。
+- Quick Tunnel 地址形如 `https://random-words.trycloudflare.com`，
+  **进程重启后会变化**；需要固定地址请改用 Cloudflare 命名隧道。
+- 地址随 `/api/nodes/report` 上报，主控写入 `vless.tunnel_address`，列表和
+  指标弹框可直接看到。
+- 隧道固定回源到 `http://localhost:<PORT>`，复用同一个 HTTP handler（健康检查
+  与 WebSocket）。
+- 需要出站 UDP/TCP 7844；`auto` 协议会在 QUIC 与 HTTP/2 之间选择。
+- Vercel 构建使用 `-tags vercel`，`tunnel_stub.go` 不导入 cloudflared，
+  上报 `tunnel.supported=false`，主控不会下发启用指令。
+- 内嵌 cloudflared 会让 Linux 二进制增大约 35 MiB（Vercel 构建仍是几 MiB），
+  首次编译也会明显变慢。
+
+> Quick Tunnel 仅适合临时/个人使用，Cloudflare 不提供可用性保证；生产环境
+> 建议使用带固定域名的命名隧道。
+
 ## HTTP 健康检查
 
 - `GET /` 返回 `vless-small ok`
@@ -330,7 +356,8 @@ curl -fsS "http://127.0.0.1:8080/${TOKEN}/config"
 
 1. 向 `<baseURL>/api/nodes/report` 上报节点信息；
 2. 使用 `Bearer <token>` 认证（`name` + `token` 必须与主控 `vless` 表中的记录一致）；
-3. 接收主控返回的所有设备，把启用设备的 `id` 当作 VLESS UUID 接受连接。
+3. 接收主控返回的所有设备，把启用设备的 `id` 当作 VLESS UUID 接受连接；
+4. 读取 `tunnel.enabled` 并启动/停止内置 cloudflared 临时隧道。
 
 节点信息由 vless-small 自动收集：
 
@@ -378,7 +405,8 @@ vless://<DEVICE_ID>@<HOST>:<PORT>?encryption=none&security=none&type=ws&path=%2F
 ## 说明
 
 - 基础依赖只有 `github.com/gorilla/websocket`；非 Vercel 构建额外包含
-  `tailscale.com/tsnet`，Vercel 构建使用 `-tags vercel` 剔除。
+  `tailscale.com/tsnet` 和 `github.com/cloudflare/cloudflared`（临时隧道），
+  Vercel 构建使用 `-tags vercel` 同时剔除两者。
 - 每条连接首条 WS 消息是 VLESS 请求头，响应头为 `[0x00, 0x00]`。
 - 支持 `cmd=1`（TCP）与 `cmd=2`（UDP，`[2B 长度][数据]` 分包）。
 - 服务端每 25s 发一次 WS ping，客户端回 pong 即续期 60s 读超时。

@@ -506,6 +506,9 @@ func TestSyncDevices(t *testing.T) {
 		if body["tsnetSupported"] != tsnetSupported() {
 			t.Errorf("report tsnetSupported = %v, want %v", body["tsnetSupported"], tsnetSupported())
 		}
+		if _, ok := body["tunnel"].(map[string]any); !ok {
+			t.Errorf("report tunnel missing: %#v", body["tunnel"])
+		}
 
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"devices": []map[string]any{
@@ -517,6 +520,7 @@ func TestSyncDevices(t *testing.T) {
 				"url":     "https://example.com/api/nodes/update?name=hk",
 				"sha256":  "deadbeef",
 			},
+			"tunnel": map[string]any{"enabled": true},
 		})
 	}))
 	defer ts.Close()
@@ -526,13 +530,16 @@ func TestSyncDevices(t *testing.T) {
 	static := map[[16]byte]struct{}{staticID: {}}
 
 	result, err := syncDevices(
-		cfg, srv, ":8080", "/ws", static, nodeInfo{runtime: "vless-small"}, "",
+		cfg, srv, ":8080", "/ws", static, nodeInfo{runtime: "vless-small"}, "", tunnelReport{},
 	)
 	if err != nil {
 		t.Fatalf("syncDevices: %v", err)
 	}
 	if result == nil || result.Update == nil || result.Update.Version != "v9.9.9" {
 		t.Fatalf("result = %#v, want update v9.9.9", result)
+	}
+	if result.Tunnel == nil || !result.Tunnel.Enabled {
+		t.Fatalf("result.Tunnel = %#v, want enabled", result.Tunnel)
 	}
 	if gotAuth != "Bearer secret" {
 		t.Fatalf("authorization = %q", gotAuth)
