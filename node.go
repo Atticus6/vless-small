@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -58,6 +59,8 @@ type nodeDevice struct {
 
 type nodeReportResponse struct {
 	Devices []nodeDevice `json:"devices"`
+	// Update 只在主控为该节点设置了目标版本、且节点版本落后时出现。
+	Update *nodeUpdate `json:"update,omitempty"`
 }
 
 var syncHTTPClient = &http.Client{Timeout: 10 * time.Second}
@@ -65,6 +68,9 @@ var syncHTTPClient = &http.Client{Timeout: 10 * time.Second}
 type nodeReport struct {
 	Name        string   `json:"name"`
 	Runtime     string   `json:"runtime"`
+	Version     string   `json:"version,omitempty"`
+	OS          string   `json:"os,omitempty"`
+	Arch        string   `json:"arch,omitempty"`
 	Listen      string   `json:"listen,omitempty"`
 	Path        string   `json:"path,omitempty"`
 	Hosts       []string `json:"hosts,omitempty"`
@@ -113,23 +119,30 @@ func syncLoop(
 	defer ticker.Stop()
 
 	for range ticker.C {
-		if err := syncDevices(cfg, srv, listen, path, static, info); err != nil {
+		update, err := syncDevices(cfg, srv, listen, path, static, info)
+		if err != nil {
 			log.Printf("device sync failed: %v", err)
+			continue
 		}
+		handleNodeUpdate(cfg, update)
 	}
 }
 
-// syncDevices 向主控上报节点信息, 并把返回的所有启用设备设为可认证 UUID.
+// syncDevices 向主控上报节点信息, 把返回的所有启用设备设为可认证 UUID,
+// 并返回主控下发的更新指令（如果有）.
 func syncDevices(
 	cfg nodeConfig,
 	srv *server,
 	listen, path string,
 	static map[[16]byte]struct{},
 	info nodeInfo,
-) error {
+) (*nodeUpdate, error) {
 	payload, err := json.Marshal(nodeReport{
 		Name:        cfg.name,
 		Runtime:     info.runtime,
+		Version:     version,
+		OS:          runtime.GOOS,
+		Arch:        runtimeAssetArch(),
 		Listen:      listen,
 		Path:        path,
 		Hosts:       info.hosts,
@@ -140,30 +153,30 @@ func syncDevices(
 		Longitude:   info.longitude,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	req, err := http.NewRequest(http.MethodPost, cfg.baseURL+"/api/nodes/report", bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+cfg.token)
 
 	resp, err := syncHTTPClient.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("report %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("report %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 
 	var result nodeReportResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("decode response: %w", err)
+		return nil, fmt.Errorf("decode response: %w", err)
 	}
 
 	users := make(map[[16]byte]struct{}, len(static)+len(result.Devices))
@@ -184,5 +197,5 @@ func syncDevices(
 
 	srv.setUsers(users)
 	log.Printf("synced %d devices from %s", len(users), cfg.baseURL)
-	return nil
+	return result.Update, nil
 }

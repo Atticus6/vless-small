@@ -1,0 +1,251 @@
+# 发布流程：每次 push 读取 version.txt，把最后一段数字 +1 作为本次构建版本，
+# 交叉编译 Linux 多架构二进制并创建 GitHub Release；发布成功后再把新版本号
+# 写回 version.txt 并推送。
+#
+# 产物命名必须与 install.sh 中的拼接逻辑保持一致：
+#   vless-small_<version>_linux_<arch>.tar.gz
+name: Release
+
+on:
+  push:
+    # 监听所有分支的推送；tag 推送不会重复触发。
+    branches:
+      - "**"
+
+# 同一时间只跑一个发布任务，保证版本号与回写顺序不会互相覆盖。
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# gh release create/upload 与回写 version.txt 都需要写仓库内容。
+permissions:
+  contents: write
+
+jobs:
+  version:
+    name: Next version
+    # 工作流自己回写的 version.txt 不再触发构建。GITHUB_TOKEN 推送本身
+    # 也不会触发新 run，这里再加一层显式防护。
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+      sha: ${{ steps.next.outputs.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # 取分支最新提交：并发 run 被串行化后能读到上一次回写的版本号。
+          ref: ${{ github.ref_name }}
+
+      - name: Compute next version
+        id: next
+        run: |
+          set -euo pipefail
+
+          raw="$(tr -d '[:space:]' < version.txt)"
+          prefix=""
+          case "$raw" in
+            v*) prefix="v"; raw="${raw#v}" ;;
+          esac
+          # 支持整数（1）和点分版本号（v0.1.0），其他格式直接失败。
+          case "$raw" in
+            ""|*[!0-9.]*|.*|*.|*..*)
+              echo "version.txt 必须是数字或点分版本号，例如 1 或 v0.1.0" >&2
+              exit 1
+              ;;
+          esac
+
+          # 只递增最后一段：v0.1.0 -> v0.1.1；1 -> 2。
+          next_core="$(printf '%s\n' "$raw" | awk -F. -v OFS=. '{ $NF = $NF + 1; print }')"
+          next="${prefix}${next_core}"
+
+          echo "version=${next}" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version.txt: ${raw} -> ${next}"
+
+  test:
+    name: Test
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 发布前先跑测试，避免无法构建或测试失败的提交覆盖 Release 资产。
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.arch }}
+    needs: [test, version]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64, arch: amd64 }
+          - { goos: linux, goarch: arm64, arch: arm64 }
+          # 32 位 ARM 由 GOARM 区分 v6/v7，产物名里用 armv6/armv7 便于用户识别。
+          - { goos: linux, goarch: arm, arch: armv6, goarm: "6" }
+          - { goos: linux, goarch: arm, arch: armv7, goarm: "7" }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build archive
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          VERSION: ${{ needs.version.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist package
+          # 版本号通过 -X 注入 main.version，安装后可用 `vless-small -version` 核对。
+          CGO_ENABLED=0 go build -trimpath \
+            -ldflags "-s -w -X main.version=${VERSION}" \
+            -o "package/vless-small" .
+          cp README.md package/
+
+          asset="vless-small_${VERSION}_${GOOS}_${ARCH}"
+          # 压缩包给 install.sh 用；原始二进制给节点自更新用，避免节点解包。
+          (cd package && tar -czf "../dist/${asset}.tar.gz" vless-small README.md)
+          cp "package/vless-small" "dist/${asset}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.goos }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish Release
+    needs: [build, version]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+
+          # install.sh 也作为资产发布，README 里的 latest/download/install.sh
+          # 才能稳定可用，不受默认分支变化影响。
+          cp install.sh dist/
+          cd dist
+          # 这里刻意使用裸文件名（不带 ./ 前缀），install.sh 与节点更新都按第二列精确匹配。
+          # vless-small_* 同时匹配 tar.gz 和原始二进制。
+          sha256sum vless-small_* install.sh > checksums.txt
+          cat checksums.txt
+
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.version.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            # 同一版本已存在（例如手动重跑）：覆盖资产即可。
+            gh release upload "$VERSION" dist/* --clobber
+          else
+            # 首次发布：用本次构建的提交创建 tag，并生成更新说明。
+            gh release create "$VERSION" dist/* \
+              --target "$SHA" \
+              --title "$VERSION" \
+              --generate-notes
+          fi
+
+  bump:
+    name: Bump version.txt
+    needs: [version, release]
+    # 只在构建与发布成功后回写；机器人提交不再触发新的发布。
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Commit and push version.txt
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          branch="${GITHUB_REF_NAME}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 用户可能在构建期间又推了新提交；每次重试都从远端最新分支开始，
+          # 把版本号提交放到最新提交之上，避免非快进 push 失败。
+          for attempt in 1 2 3; do
+            git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}"
+            git checkout -B "${branch}" "origin/${branch}"
+
+            current="$(tr -d '[:space:]' < version.txt)"
+            if [ "$current" = "$VERSION" ]; then
+              echo "version.txt 已经是 ${VERSION}，无需回写"
+              exit 0
+            fi
+            # 手动改过更高版本时不要降级；sort -V 同时支持 1 和 v0.1.0。
+            if [ "$(printf '%s\n%s\n' "$current" "$VERSION" | sort -V | tail -n 1)" != "$VERSION" ]; then
+              echo "version.txt (${current}) 已高于 ${VERSION}，跳过回写"
+              exit 0
+            fi
+
+            printf '%s\n' "$VERSION" > version.txt
+            git add version.txt
+            if git diff --cached --quiet; then
+              echo "version.txt 没有变化"
+              exit 0
+            fi
+            git commit -m "chore: bump version to ${VERSION} [skip ci]"
+
+            if git push origin "HEAD:refs/heads/${branch}"; then
+              echo "已回写 version.txt 到 ${branch}"
+              exit 0
+            fi
+
+            echo "push 失败，重试 (${attempt}/3)"
+            sleep 2
+          done
+
+          echo "无法回写 version.txt，请检查分支保护设置" >&2
+          exit 1

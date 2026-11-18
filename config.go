@@ -13,6 +13,7 @@ type config struct {
 	wsPath       string
 	xhttpPath    string
 	controlPlane string
+	showVersion  bool
 }
 
 // parseFlags 读取命令行参数与环境变量，并规范化路径.
@@ -31,6 +32,7 @@ func parseFlags() config {
 		"XHTTP stream-one path (default /xhttp; use none to disable)",
 	)
 	controlPlane := flag.String("config", os.Getenv("CONFIG"), "control plane: <baseURL>_<name>_<token>")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
 	wsPath := strings.TrimSpace(*path)
@@ -44,6 +46,7 @@ func parseFlags() config {
 		wsPath:       wsPath,
 		xhttpPath:    resolveXHTTPPath(*xhttpPathFlag),
 		controlPlane: *controlPlane,
+		showVersion:  *showVersion,
 	}
 }
 

@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -15,8 +16,18 @@ import (
 	"time"
 )
 
+// version 由 Release workflow 通过 -ldflags "-X main.version=<tag>" 注入；
+// 本地 go run/go build 时为 dev。
+var version = "dev"
+
 func main() {
 	cfg := parseFlags()
+
+	// 版本查询必须在配置校验之前：安装脚本用它确认二进制可执行。
+	if cfg.showVersion {
+		fmt.Printf("vless-small %s\n", version)
+		return
+	}
 
 	nodeCfg, err := parseNodeConfig(cfg.controlPlane)
 	if err != nil {
@@ -79,9 +90,11 @@ func startNodeSync(cfg config, nodeCfg nodeConfig, srv *server, users map[[16]by
 		"node info runtime=%s hosts=%v ipv4=%s ipv6=%s country=%s",
 		info.runtime, info.hosts, info.ipv4, info.ipv6, info.countryCode,
 	)
-	if err := syncDevices(nodeCfg, srv, cfg.listen, cfg.wsPath, users, info); err != nil {
+	update, err := syncDevices(nodeCfg, srv, cfg.listen, cfg.wsPath, users, info)
+	if err != nil {
 		log.Printf("initial device sync failed: %v", err)
 	}
+	handleNodeUpdate(nodeCfg, update)
 
 	// Vercel / Railway 无请求时会自动休眠；后台定时同步会产生持续请求，
 	// 让实例无法休眠。这两个平台只在冷启动时同步一次。

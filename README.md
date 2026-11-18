@@ -17,9 +17,13 @@
 | `xhttp_packet.go` | XHTTP packet-up 会话、上传队列与下载流 |
 | `protocol.go` | VLESS 请求头解析（内存缓冲与流式两种） |
 | `node.go` | CONFIG 解析、节点上报、设备同步 |
+| `update.go` | 版本比较、自更新下载、sha256 校验与原子替换 |
 | `platform.go` | 运行时识别、公网 hosts、IP/地理位置查询 |
 | `users.go` | UUID 列表解析 |
 | `constants.go` | 协议、超时与默认路径常量 |
+| `version.txt` | 当前版本号，Release workflow 唯一版本来源 |
+| `install.sh` | 一键安装脚本，作为 Release 资产发布 |
+| `.github/workflows/release.yml` | push 触发的多平台构建与 GitHub Release |
 
 ## 运行
 
@@ -41,6 +45,119 @@ go run . -uuid 14725836-1234-5678-9abc-def012345678 -listen :8080 -path /ws
 | `-path` / `WS_PATH` | 空（任意路径） | 只接受指定 WS 路径，如 `/ws` |
 | `-xhttp-path` / `XHTTP_PATH` | `/xhttp` | XHTTP 路径；设为 `none` / `off` 可禁用 |
 | `-config` / `CONFIG` | — | `<baseURL>_<name>_<token>`，用于向主控上报并同步设备 |
+| `-version` | `dev` | 打印版本；Release 构建通过 `-ldflags -X main.version` 注入 tag |
+
+## 一键安装
+
+版本号以 `version.txt` 为准。每次 push（任意分支）都会触发 GitHub Actions
+（`.github/workflows/release.yml`）：
+
+1. 读取 `version.txt`，把最后一段数字 +1 作为本次版本号
+   （`v0.1.0` → `v0.1.1`，`1` → `2`）；
+2. 运行 `go vet` / `go test`，交叉编译 Linux 多架构二进制
+   （amd64/arm64/armv6/armv7），生成 `checksums.txt` 并创建 GitHub Release；
+3. 构建和发布成功后，把新版本号写回 `version.txt` 并推送到当前分支
+   （提交信息带 `[skip ci]`，不会再次触发构建）。
+
+不需要手动打 tag 或改版本号。如果要调整版本序列，直接修改 `version.txt`
+并推送，workflow 会从该值继续 +1。
+
+仓库是私有的，安装脚本和 Release 资产都需要一个有 `Contents: Read` 权限的
+GitHub Token。Linux 上安装为 systemd 服务（需要 root）：
+
+```bash
+GITHUB_TOKEN='<github token>'; \
+  curl -fsSL -H "Authorization: token $GITHUB_TOKEN" \
+    https://github.com/Atticus6/vless-small/releases/latest/download/install.sh \
+  | sudo GITHUB_TOKEN="$GITHUB_TOKEN" bash -s -- \
+      --config "https://dsh.example.com_hk_<token>" --path /ws
+```
+
+也可以直接在控制台的“VLESS 管理”页点击“复制安装命令”，会自动填入当前节点
+的 CONFIG 和 Web 配置的 `GITHUB_TOKEN`。
+
+脚本按 `uname` 选择对应资产并校验 sha256，创建 `vless-small` 系统用户，把配置
+写入 `/etc/vless-small/vless-small.env`（0600），注册
+`/etc/systemd/system/vless-small.service`，最后用 `http://127.0.0.1:<PORT>/healthz`
+做启动检查。
+
+| 参数 | 说明 |
+| --- | --- |
+| `--config` / `--uuid` | 主控 CONFIG 或静态 UUID，至少提供一个 |
+| `--port` | 监听端口，默认 8080 |
+| `--path` | WebSocket 路径，如 `/ws`；不填则接受任意路径 |
+| `--xhttp-path` | XHTTP 路径，默认 `/xhttp`；`none` 禁用 |
+| `--public-host` / `--public-hosts` | 上报的公网域名，可重复或逗号分隔 |
+| `--node-runtime` | 节点上报的 runtime，默认自动识别 |
+| `--version` | 指定 Release 版本，默认 latest |
+| `--github-token` | 私有仓库 token；也可用环境变量 `GITHUB_TOKEN` |
+| `--install-dir` | 二进制目录；root 默认 `/opt/vless-small`（服务用户可写，支持自更新），非 root 默认 `~/.local/bin`；root 安装会在 `/usr/local/bin` 建符号链接 |
+| `--service` / `--no-service` | 强制或禁止注册 systemd 服务 |
+| `--uninstall` | 停止服务并删除配置与二进制 |
+
+```bash
+# 下面的示例省略了私有仓库的 token；请像上面一样给 curl 加 -H，
+# 并通过 sudo GITHUB_TOKEN 传给安装脚本。
+
+# 升级：不带配置参数时保留已有 env 文件
+curl -fsSL https://github.com/Atticus6/vless-small/releases/latest/download/install.sh \
+  | sudo bash
+
+# 非 root（没有 systemd 权限）：只安装二进制到 ~/.local/bin
+curl -fsSL https://github.com/Atticus6/vless-small/releases/latest/download/install.sh \
+  | bash -s -- --uuid "14725836-1234-5678-9abc-def012345678" --no-service
+
+# 卸载
+curl -fsSL https://github.com/Atticus6/vless-small/releases/latest/download/install.sh \
+  | sudo bash -s -- --uninstall
+```
+
+服务管理：
+
+```bash
+systemctl status vless-small
+journalctl -u vless-small -f
+vless-small -version   # 查看已安装版本
+```
+
+> 本服务不内置 TLS。生产环境请放在 Nginx / Caddy / Cloudflare 之后，并配置
+> WebSocket Upgrade 与较长的读超时；订阅默认使用 443 + `/ws` + `/xhttp`。
+
+## 自动更新（Web 下发）
+
+节点每次上报都会带上 `version` / `os` / `arch`。主控“VLESS 管理”页点击
+“下发更新”后，Worker 把最新 Release 的目标版本和原始二进制 sha256 写入节点
+记录；节点在下一次上报（≤60 秒）收到更新指令后：
+
+1. 用自身 `name` + `token` 从主控 `/api/nodes/update` 下载原始二进制
+   （Worker 用 `GITHUB_TOKEN` 访问私有 Release，节点不接触 GitHub 凭据）；
+2. 校验 sha256，在二进制同目录写临时文件并原子替换；
+3. 退出，由 systemd / Docker 按重启策略拉起新版本。
+
+**systemd**：新版安装脚本把二进制放到 `/opt/vless-small`（属主为服务用户），
+`/usr/local/bin/vless-small` 是指向它的符号链接，systemd unit 通过
+`ReadWritePaths=/opt/vless-small` 允许替换。已有旧节点需要**重跑一次**新版
+`install.sh` 完成迁移，否则二进制仍位于 `/usr/local/bin`，服务用户没有写权限。
+
+**Docker**：
+
+```bash
+docker build -t vless-small .
+docker run -d --restart=always --name vless-small \
+  -e CONFIG="https://dsh.example.com_hk_<token>" \
+  -p 8080:8080 vless-small
+```
+
+镜像内二进制位于 `/app/bin`（属主 10001），容器内可自更新；`docker restart`
+后仍使用更新后的二进制。注意：
+
+- `--restart=always` 必须设置，否则替换后进程退出不会自动拉起；
+- `docker compose up -d` 重建容器会回到镜像里的版本，需要再次下发更新或重建镜像；
+- 只读 rootfs（`--read-only`）无法自更新。
+
+首轮升级：旧版本节点不认识 `update` 字段，需要手动重跑一次安装脚本或更新
+镜像，之后 Web 按钮才会生效。SaaS 自动休眠运行时（Vercel/Railway）不会后台
+轮询，Web 会拒绝下发。
 
 ## XHTTP
 
@@ -102,6 +219,8 @@ stream-one 需要端到端支持双向流式传输（直连 TLS/REALITY 或 HTTP
 
 | 字段 | 来源 |
 | --- | --- |
+| `version` | 构建时通过 `-ldflags -X main.version` 注入的 Release 版本；本地构建为 `dev` |
+| `os` / `arch` | `runtime.GOOS` 与 Release 资产架构（amd64/arm64/armv6/armv7，32 位 ARM 来自 `GOARM`） |
 | `runtime` | `NODE_RUNTIME` / `RUNTIME`，否则根据 `VERCEL`、`RAILWAY_*`、`RENDER_*`、`FLY_APP_NAME`、`KOYEB_*`、`CF_PAGES*`、`ZEABUR*`、`NF_*` 自动判断 |
 | `hosts` | `PUBLIC_HOSTS`（逗号分隔）/ `PUBLIC_HOST`，否则读取平台分配的公网域名；Northflank 使用 `NF_HOSTS` |
 

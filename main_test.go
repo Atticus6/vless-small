@@ -6,11 +6,13 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -497,11 +499,22 @@ func TestSyncDevices(t *testing.T) {
 		if body["name"] != "hk" || body["runtime"] != "vless-small" {
 			t.Errorf("report body = %#v", body)
 		}
+		if body["version"] != version {
+			t.Errorf("report version = %q, want %q", body["version"], version)
+		}
+		if body["os"] == "" || body["arch"] == "" {
+			t.Errorf("report os/arch missing: %#v", body)
+		}
 
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"devices": []map[string]any{
 				{"id": testUUID, "name": "phone", "enabled": true},
 				{"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "name": "disabled", "enabled": false},
+			},
+			"update": map[string]any{
+				"version": "v9.9.9",
+				"url":     "https://example.com/api/nodes/update?name=hk",
+				"sha256":  "deadbeef",
 			},
 		})
 	}))
@@ -511,8 +524,12 @@ func TestSyncDevices(t *testing.T) {
 	cfg := nodeConfig{baseURL: ts.URL, name: "hk", token: "secret"}
 	static := map[[16]byte]struct{}{staticID: {}}
 
-	if err := syncDevices(cfg, srv, ":8080", "/ws", static, nodeInfo{runtime: "vless-small"}); err != nil {
+	update, err := syncDevices(cfg, srv, ":8080", "/ws", static, nodeInfo{runtime: "vless-small"})
+	if err != nil {
 		t.Fatalf("syncDevices: %v", err)
+	}
+	if update == nil || update.Version != "v9.9.9" {
+		t.Fatalf("update = %#v, want v9.9.9", update)
 	}
 	if gotAuth != "Bearer secret" {
 		t.Fatalf("authorization = %q", gotAuth)
@@ -901,5 +918,23 @@ func TestHealthEndpoints(t *testing.T) {
 	defer wsResp.Body.Close()
 	if wsResp.StatusCode != http.StatusUpgradeRequired {
 		t.Fatalf("/ws status = %d, want 426", wsResp.StatusCode)
+	}
+}
+
+// TestParseFlagsVersion 验证 -version 能被解析，main 会在配置校验前直接退出。
+// 安装脚本用它确认二进制可在没有 UUID/CONFIG 的情况下执行。
+func TestParseFlagsVersion(t *testing.T) {
+	originalArgs := os.Args
+	originalFlags := flag.CommandLine
+	t.Cleanup(func() {
+		os.Args = originalArgs
+		flag.CommandLine = originalFlags
+	})
+
+	flag.CommandLine = flag.NewFlagSet("vless-small-test", flag.ContinueOnError)
+	os.Args = []string{"vless-small", "-version"}
+
+	if cfg := parseFlags(); !cfg.showVersion {
+		t.Fatal("parseFlags 未识别 -version")
 	}
 }
