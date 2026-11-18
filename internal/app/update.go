@@ -33,10 +33,12 @@ type nodeUpdate struct {
 	SHA256 string `json:"sha256"`
 }
 
-// runtimeAssetArch 返回与 Release 资产名一致的架构后缀。
+// runtimeAssetArch 返回节点上报用的架构后缀。
 //
-// Release 里 32 位 ARM 按 GOARM 区分为 armv6/armv7，而 runtime.GOARCH 只有
-// "arm"；GOARM 只在构建信息里，需要从 debug.ReadBuildInfo 读取。
+// Release workflow 目前只构建 linux/amd64 与 linux/arm64；32 位 ARM 仍可能
+// 由用户自行 `go build`/Docker 构建运行，因此这里保留 armv6/armv7 的区分，
+// 让主控能准确判断“有节点但无对应 Release 资产”，而不是误报为 amd64。
+// runtime.GOARCH 只有 "arm"，GOARM 只在构建信息里，需要从 debug.ReadBuildInfo 读取。
 func runtimeAssetArch() string {
 	goarm := ""
 	if info, ok := debug.ReadBuildInfo(); ok {
@@ -59,7 +61,8 @@ func assetArch(goarch, goarm string) string {
 	case "6":
 		return "armv6"
 	default:
-		// 构建信息缺失时按最常见的 armv7 处理，与 Release 默认产物一致。
+		// 构建信息缺失时按最常见的 armv7 处理；Release 不提供该架构，
+		// 主控会因此拒绝下发更新。
 		return "armv7"
 	}
 }

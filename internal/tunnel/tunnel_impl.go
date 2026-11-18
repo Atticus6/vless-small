@@ -101,6 +101,8 @@ type quickTunnel struct {
 	cancel  context.CancelFunc
 	url     string
 	lastErr string
+	// generation 每次启动/停止都会递增，用于丢弃上一代 supervisor 的退出事件。
+	generation int
 }
 
 // Sync 启动/停止临时隧道；重复调用是幂等的。
@@ -158,8 +160,15 @@ func (t *quickTunnel) startLocked() {
 		return
 	}
 
+	// 换代后再启动：即使旧 supervisor 立刻退出，它的回调也会因为
+	// generation 不匹配而忽略，不会清掉本次新分配的 URL。
+	t.generation++
+	generation := t.generation
+
 	ctx, cancel := context.WithCancel(context.Background())
-	url, err := createCloudflareTunnel(ctx, t.port, "auto")
+	url, err := createCloudflareTunnel(ctx, t.port, "auto", func(err error) {
+		t.supervisorExited(generation, err)
+	})
 	if err != nil {
 		cancel()
 		t.lastErr = err.Error()
@@ -175,6 +184,7 @@ func (t *quickTunnel) startLocked() {
 
 // stopLocked 取消隧道上下文；cloudflared supervisor 会随 ctx 退出。
 func (t *quickTunnel) stopLocked() {
+	t.generation++
 	if t.cancel != nil {
 		t.cancel()
 		t.cancel = nil
@@ -182,11 +192,46 @@ func (t *quickTunnel) stopLocked() {
 	t.url = ""
 }
 
+// supervisorExited 在 cloudflared supervisor 意外退出后清理隧道状态。
+//
+// 清空 cancel 与 URL 后，下一次 Sync(true) 会重新申请隧道；否则节点会
+// 一直上报一个已经失效的 trycloudflare 地址，订阅里也会留下连不上的节点。
+// generation 用于忽略已被 stopLocked 或新一次 startLocked 取代的旧 goroutine。
+func (t *quickTunnel) supervisorExited(generation int, err error) {
+	message := "隧道连接已断开，将在下次同步后重试"
+	if err != nil {
+		message = err.Error()
+	}
+
+	t.mu.Lock()
+	if t.closed || t.generation != generation {
+		t.mu.Unlock()
+		return
+	}
+	cancel := t.cancel
+	t.cancel = nil
+	t.url = ""
+	t.lastErr = message
+	t.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	log.Printf("tunnel: %s", message)
+}
+
 // createCloudflareTunnel 申请临时隧道并在后台启动 cloudflared supervisor。
 //
 // 这里的实现参考 cloudflared 的 RunQuickTunnel，但直接调用公开包，把
 // cloudflared 编译进当前进程；返回的 URL 在隧道重启后会变化。
-func createCloudflareTunnel(ctx context.Context, port int, protocol string) (string, error) {
+// onExit 在 supervisor 退出时调用（含主动停止），由调用方按 generation
+// 判断是否需要清理状态。
+func createCloudflareTunnel(
+	ctx context.Context,
+	port int,
+	protocol string,
+	onExit func(error),
+) (string, error) {
 	switch protocol {
 	case "", "auto", "quic", "http2":
 		if protocol == "" {
@@ -263,11 +308,21 @@ func createCloudflareTunnel(ctx context.Context, port int, protocol string) (str
 	shutdown := make(chan struct{})
 
 	go func() {
-		if err := supervisor.StartTunnelDaemon(ctx, tunnelConfig, orchestrator, connectedSignal, reconnectCh, shutdown); err != nil {
-			if ctx.Err() == nil {
-				log.Printf("tunnel: supervisor stopped: %v", err)
-			}
+		err := supervisor.StartTunnelDaemon(
+			ctx,
+			tunnelConfig,
+			orchestrator,
+			connectedSignal,
+			reconnectCh,
+			shutdown,
+		)
+		// 主动停止（stopLocked/Close）会让 ctx 取消，不能算故障；
+		// 清理与否由 onExit 里的 generation 判断。
+		exitErr := err
+		if ctx.Err() != nil {
+			exitErr = nil
 		}
+		onExit(exitErr)
 	}()
 
 	return "https://" + tunnel.QuickTunnelUrl, nil

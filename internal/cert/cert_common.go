@@ -35,3 +35,16 @@ type Controller interface {
 func certRuntimeAllowed(runtime string) bool {
 	return strings.ToLower(strings.TrimSpace(runtime)) == "local"
 }
+
+// shouldSyncCert 判断本次 Sync 是否可以跳过。
+//
+// 域名相同且证书已启用时不需要重启服务；关闭证书（空域名）且当前也没有
+// 域名时同样无需处理。缺少后一条时，上报循环每 60 秒都会执行一次
+// stop/notify，向主控发送没有变化的状态回调。非空域名启动失败（例如
+// 80/443 被占用）仍要每次重试，因此不能只要域名相同就直接返回。
+func shouldSyncCert(currentDomain string, enabled bool, nextDomain string) bool {
+	if nextDomain != currentDomain {
+		return false
+	}
+	return enabled || nextDomain == ""
+}

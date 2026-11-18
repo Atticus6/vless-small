@@ -63,7 +63,7 @@ func (c *certManager) Sync(domain string) {
 		}
 	}()
 
-	if domain == c.domain && c.enabled {
+	if shouldSyncCert(c.domain, c.enabled, domain) {
 		return
 	}
 
@@ -199,18 +199,8 @@ func (c *certManager) stopLocked() {
 		c.cancel = nil
 	}
 
-	shutdown := func(server *http.Server) {
-		if server == nil {
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_ = server.Shutdown(ctx)
-		_ = server.Close()
-	}
-
-	shutdown(c.httpServer)
-	shutdown(c.tlsServer)
+	shutdownCertServer(c.httpServer)
+	shutdownCertServer(c.tlsServer)
 	c.httpServer = nil
 	c.tlsServer = nil
 	c.httpLn = nil
@@ -218,6 +208,20 @@ func (c *certManager) stopLocked() {
 	c.enabled = false
 	c.expiresAt = ""
 	c.issuer = ""
+}
+
+// shutdownCertServer 关闭一个 80/443 服务并等待在途请求（最多 3 秒）。
+//
+// fail 在锁外调用它，避免阻塞 Status()；stopLocked 在 Sync 的状态切换
+// 期间持锁调用，需要先释放旧端口才能重新监听，等待上限由这里的超时兜底。
+func shutdownCertServer(server *http.Server) {
+	if server == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = server.Shutdown(ctx)
+	_ = server.Close()
 }
 
 // refreshLoop 主动触发一次签发，并在之后定期续期/刷新到期时间。
@@ -285,6 +289,10 @@ func (c *certManager) updateCert(
 	go c.notify()
 }
 
+// fail 处理 80/443 服务异常退出。
+//
+// 除了关闭开关和记录错误，还要真正释放两个监听端口：Serve 返回并不代表
+// listener 已经关闭，端口若继续占着，主控重试时只会一直拿到“端口不可用”。
 func (c *certManager) fail(generation int, message string) {
 	c.mu.Lock()
 	if c.generation != generation {
@@ -297,7 +305,20 @@ func (c *certManager) fail(generation int, message string) {
 		c.cancel()
 		c.cancel = nil
 	}
+
+	httpServer, tlsServer := c.httpServer, c.tlsServer
+	c.httpServer = nil
+	c.tlsServer = nil
+	c.httpLn = nil
+	c.tlsLn = nil
+	c.expiresAt = ""
+	c.issuer = ""
 	c.mu.Unlock()
+
+	// 不持锁关闭：Shutdown 最多等 3 秒，避免 Status()（/<token>/config）
+	// 被同一把锁卡住。
+	shutdownCertServer(httpServer)
+	shutdownCertServer(tlsServer)
 
 	go c.notify()
 }
