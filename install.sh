@@ -550,6 +550,9 @@ Restart=always
 RestartSec=3
 TimeoutStopSec=15
 NoNewPrivileges=true
+# 自动证书需要服务用户绑定 80/443；只授予低端口绑定能力。
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 PrivateTmp=true
 ProtectSystem=strict
 # 自更新需要在安装目录里写临时文件并 rename，必须显式放开。

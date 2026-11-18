@@ -530,7 +530,8 @@ func TestSyncDevices(t *testing.T) {
 	static := map[[16]byte]struct{}{staticID: {}}
 
 	result, err := syncDevices(
-		cfg, srv, ":8080", "/ws", static, nodeInfo{runtime: "vless-small"}, "", tunnelReport{},
+		cfg, srv, ":8080", "/ws", static, nodeInfo{runtime: "vless-small"},
+		"", tunnelReport{}, certReport{},
 	)
 	if err != nil {
 		t.Fatalf("syncDevices: %v", err)

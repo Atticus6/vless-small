@@ -44,13 +44,25 @@ func main() {
 
 	srv := newServer(users, cfg.wsPath)
 	srv.controlToken = nodeCfg.token
+
+	handler := http.HandlerFunc(srv.handleHTTP)
 	tunnelCtl := newTunnelController(cfg.listen)
+	certCtl := newCertController(handler)
+	srv.tunnelStatus = tunnelCtl.Status
+	srv.certStatus = certCtl.Status
+	if nodeCfg.baseURL != "" {
+		certCtl.SetReporter(func(status certReport) {
+			reportCertState(nodeCfg, status)
+		})
+	}
 	defer tunnelCtl.Close()
-	startNodeSync(cfg, nodeCfg, srv, users, tunnelCtl)
+	defer certCtl.Close()
+
+	startNodeSync(cfg, nodeCfg, srv, users, tunnelCtl, certCtl)
 
 	httpServer := &http.Server{
 		Addr:              cfg.listen,
-		Handler:           http.HandlerFunc(srv.handleHTTP),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -85,6 +97,7 @@ func startNodeSync(
 	srv *server,
 	users map[[16]byte]struct{},
 	tunnelCtl tunnelController,
+	certCtl certController,
 ) {
 	if nodeCfg.baseURL == "" {
 		return
@@ -92,15 +105,15 @@ func startNodeSync(
 
 	info := collectNodeInfo()
 	log.Printf(
-		"node info runtime=%s hosts=%v ipv4=%s ipv6=%s country=%s tunnel=%v",
+		"node info runtime=%s hosts=%v ipv4=%s ipv6=%s country=%s tunnel=%v cert=%v",
 		info.runtime, info.hosts, info.ipv4, info.ipv6, info.countryCode,
-		tunnelSupported(),
+		tunnelSupported(), certCtl.Status().Supported,
 	)
 
 	tsnetCtl := newTSNetController(nodeCfg, tsnetHandler(srv))
 	result, err := syncDevices(
 		nodeCfg, srv, cfg.listen, cfg.wsPath, users, info,
-		tsnetCtl.IP(), tunnelCtl.Status(),
+		tsnetCtl.IP(), tunnelCtl.Status(), certCtl.Status(),
 	)
 	if err != nil {
 		log.Printf("initial device sync failed: %v", err)
@@ -109,6 +122,9 @@ func startNodeSync(
 		tsnetCtl.Sync(result.Tsnet != nil && result.Tsnet.Enabled)
 		if result.Tunnel != nil {
 			tunnelCtl.Sync(result.Tunnel.Enabled)
+		}
+		if result.Cert != nil {
+			certCtl.Sync(result.Cert.Domain)
 		}
 		handleNodeUpdate(nodeCfg, result.Update)
 	}
@@ -119,7 +135,10 @@ func startNodeSync(
 		log.Printf("runtime %s: background sync disabled (auto-sleep)", info.runtime)
 		return
 	}
-	go syncLoop(nodeCfg, srv, cfg.listen, cfg.wsPath, users, info, tsnetCtl, tunnelCtl)
+	go syncLoop(
+		nodeCfg, srv, cfg.listen, cfg.wsPath, users, info,
+		tsnetCtl, tunnelCtl, certCtl,
+	)
 }
 
 func displayPath(path string) string {

@@ -23,6 +23,9 @@
 | `tunnel_common.go` | 临时隧道开关、上报结构与本地端口解析 |
 | `tunnel_impl.go` | 非 Vercel 构建：内嵌 cloudflared，申请并运行临时隧道 |
 | `tunnel_stub.go` | Vercel 构建的空实现（`-tags vercel`，不编译 cloudflared） |
+| `cert_common.go` | 自动证书开关/状态与控制器接口 |
+| `cert_impl.go` | Linux 非 Vercel：ACME 证书申请，监听 80/443 提供 TLS |
+| `cert_stub.go` | Vercel/非 Linux 构建的空实现 |
 | `platform.go` | 运行时识别、公网 hosts、IP/地理位置查询 |
 | `users.go` | UUID 列表解析 |
 | `constants.go` | 协议、超时与默认路径常量 |
@@ -238,6 +241,31 @@ Go 依赖直接编译进进程，节点会向 `api.trycloudflare.com` 申请一�
 > Quick Tunnel 仅适合临时/个人使用，Cloudflare 不提供可用性保证；生产环境
 > 建议使用带固定域名的命名隧道。
 
+## 自动 HTTPS 证书
+
+主控“VLESS 管理 → 自动证书”填写域名后，节点在下一次上报（≤60 秒）收到
+`cert.domain`，并检查本机 80/443 是否空闲：
+
+- 两个端口都空闲：使用 Let's Encrypt（ACME）申请证书，节点直接监听
+  `:80`（HTTP-01 校验/跳转）和 `:443`（TLS + WS）。
+- 任一端口被占用（例如已有 Nginx/Caddy）：不启动证书，`/<token>/config`
+  返回错误，节点上的 `:8080` 服务不受影响。
+- 证书缓存在二进制同目录的 `.certs/`，重启不会重新申请。
+- 申请成功/失败/端口占用会立即 `POST /api/nodes/cert` 回调主控（name +
+  Bearer token），状态、到期时间、签发者和错误写入 `vless` 表；周期上报也会
+  携带同一份 `cert` 状态作为兜底。
+- 证书有效后主控会在订阅里额外生成一个 `昵称 · 证书` 节点，使用 443 TLS。
+
+限制：
+
+- 仅 **纯 Linux 非 Docker** 环境；Docker/Podman/Kubernetes 会在上报中返回
+  `cert.supported=false`。Vercel 构建（`-tags vercel`）完全剔除证书代码。
+- 域名必须解析到该节点，且公网能访问 80/443。
+- 安装脚本生成的 systemd 服务已加入 `CAP_NET_BIND_SERVICE`，服务用户可绑定
+  低端口；手动运行需要 root 或同等 capability。
+- 证书状态写入主控后，订阅会额外生成一个 `昵称 · 证书` 节点；域名已经在
+  `hosts` 或隧道中时不会重复。
+
 ## HTTP 健康检查
 
 - `GET /` 返回 `vless-small ok`
@@ -324,6 +352,17 @@ curl -fsS "http://127.0.0.1:8080/${TOKEN}/config"
         "usedPercent": 50
       }
     ]
+  },
+  "tunnel": {
+    "supported": true,
+    "url": "https://random-words.trycloudflare.com"
+  },
+  "cert": {
+    "supported": true,
+    "enabled": true,
+    "domain": "node.example.com",
+    "expiresAt": "2027-02-01T00:00:00Z",
+    "issuer": "R11"
   }
 }
 ```
@@ -367,6 +406,7 @@ curl -fsS "http://127.0.0.1:8080/${TOKEN}/config"
 | `os` / `arch` | `runtime.GOOS` 与 Release 资产架构（仅发布 amd64/arm64） |
 | `tsnetSupported` | 当前二进制是否包含 tsnet；Vercel 构建为 `false` |
 | `tsnetIp` | 内嵌 Tailscale 连接成功后上报的 tailnet IPv4 |
+| `cert` | 自动证书状态；主控据此写入 `cert_*` 并生成证书节点 |
 | `runtime` | `NODE_RUNTIME` / `RUNTIME`，否则根据 `VERCEL`、`RAILWAY_*`、`RENDER_*`、`FLY_APP_NAME`、`KOYEB_*`、`CF_PAGES*`、`ZEABUR*`、`NF_*` 自动判断 |
 | `hosts` | `PUBLIC_HOSTS`（逗号分隔）/ `PUBLIC_HOST`，否则读取平台分配的公网域名；Northflank 使用 `NF_HOSTS` |
 

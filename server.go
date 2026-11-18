@@ -45,6 +45,10 @@ type server struct {
 	// 当前已认证的 WS 连接按 UUID 计数，用于 /<token>/config 展示。
 	activeIDsMu sync.Mutex
 	activeIDs   map[[16]byte]int
+
+	// tunnelStatus / certStatus 由 main 注入，/<token>/config 返回实时状态。
+	tunnelStatus func() tunnelReport
+	certStatus   func() certReport
 }
 
 // healthResponse 是 /healthz 的响应，只保留探活必需的信息。
@@ -82,6 +86,9 @@ type configResponse struct {
 	Disk              *diskHealth  `json:"disk,omitempty"`
 	// System 是宿主机/操作系统的 CPU、内存和磁盘占用（仅 Linux）。
 	System *systemHealth `json:"system,omitempty"`
+	// Tunnel / Cert 是内置 cloudflared 与自动证书的实时状态。
+	Tunnel tunnelReport `json:"tunnel"`
+	Cert   certReport   `json:"cert"`
 }
 
 // activeUUID 是当前已认证连接的一个 UUID，Connections 是并发连接数.
@@ -306,6 +313,15 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) bool {
 			disk = usage
 		}
 
+		tunnel := tunnelReport{}
+		if s.tunnelStatus != nil {
+			tunnel = s.tunnelStatus()
+		}
+		cert := certReport{}
+		if s.certStatus != nil {
+			cert = s.certStatus()
+		}
+
 		writeJSON(w, configResponse{
 			OK:                true,
 			Version:           version,
@@ -328,6 +344,8 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) bool {
 			Memory: readMemoryStats(),
 			Disk:   disk,
 			System: s.systemHealth(),
+			Tunnel: tunnel,
+			Cert:   cert,
 		})
 		return true
 	}
