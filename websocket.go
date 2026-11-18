@@ -54,6 +54,9 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 		log.Printf("reject %s: unknown UUID", r.RemoteAddr)
 		return
 	}
+	s.addActiveUUID(id)
+	// 连接在 relay 返回后关闭；先登记再 defer，确保异常退出也会清理。
+	defer s.removeActiveUUID(id)
 
 	// 认证通过后再启用 pong 续期, 未认证连接无法拖延 headerTimeout.
 	ws.SetPongHandler(func(string) error {

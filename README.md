@@ -57,8 +57,8 @@ go run . -uuid 14725836-1234-5678-9abc-def012345678 -listen :8080 -path /ws
 
 1. 读取 `version.txt`，把最后一段数字 +1 作为本次版本号
    （`v0.1.0` → `v0.1.1`，`1` → `2`）；
-2. 运行 `go vet` / `go test`，交叉编译 Linux 多架构二进制
-   （amd64/arm64/armv6/armv7），生成 `checksums.txt` 并创建 GitHub Release；
+2. 运行 `go vet` / `go test`，交叉编译 Linux amd64/arm64 二进制，
+   生成 `checksums.txt` 并创建 GitHub Release；
 3. 构建和发布成功后，把新版本号写回 `version.txt` 并推送到当前分支
    （提交信息带 `[skip ci]`，不会再次触发构建）。
 
@@ -215,12 +215,113 @@ Tailscale API token）时，节点在下次上报后停止 tsnet；Tailscale 控
 ## HTTP 健康检查
 
 - `GET /` 返回 `vless-small ok`
-- `GET /healthz` 返回实例存活时间：
+- `GET /healthz` 只返回探活必需信息：
 
 ```json
-{"ok":true,"uptime":"1m23s","uptimeSeconds":83}
+{
+  "ok": true,
+  "version": "v0.1.3",
+  "uptime": "1m23s",
+  "uptimeSeconds": 83
+}
 ```
 
+- `GET /<token>/config` 返回完整运行状态（版本、CPU、内存、磁盘、连接数等）。
+  `<token>` 就是 CONFIG 的最后一段，和节点上报使用同一个密钥：
+
+```bash
+curl -fsS "http://127.0.0.1:8080/${TOKEN}/config"
+```
+
+```json
+{
+  "ok": true,
+  "version": "v0.1.3",
+  "uptime": "1m23s",
+  "uptimeSeconds": 83,
+  "goVersion": "go1.27.4",
+  "os": "linux",
+  "arch": "amd64",
+  "hostname": "hk-01",
+  "pid": 1234,
+  "devices": 5,
+  "activeConnections": 2,
+  "activeUUIDs": [
+    { "uuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "connections": 2 }
+  ],
+  "goroutines": 18,
+  "cpu": {
+    "percent": 1.25,
+    "cores": 4,
+    "processSeconds": 1.04
+  },
+  "memory": {
+    "allocBytes": 12582912,
+    "heapInuseBytes": 10485760,
+    "sysBytes": 41943040,
+    "rssBytes": 52428800,
+    "numGC": 12
+  },
+  "disk": {
+    "path": "/opt/vless-small",
+    "totalBytes": 107374182400,
+    "usedBytes": 53687091200,
+    "freeBytes": 51539607552,
+    "usedPercent": 50
+  },
+  "system": {
+    "uptimeSeconds": 98765,
+    "cpu": {
+      "percent": 12.5,
+      "cores": 4,
+      "load1": 0.52,
+      "load5": 0.58,
+      "load15": 0.59
+    },
+    "memory": {
+      "totalBytes": 16777216000,
+      "usedBytes": 6291456000,
+      "freeBytes": 2097152000,
+      "availableBytes": 10485760000,
+      "usedPercent": 37.5,
+      "swapTotalBytes": 2097152000,
+      "swapUsedBytes": 1048576000
+    },
+    "disk": [
+      {
+        "path": "/",
+        "device": "/dev/sda1",
+        "fsType": "ext4",
+        "totalBytes": 107374182400,
+        "usedBytes": 53687091200,
+        "freeBytes": 51539607552,
+        "usedPercent": 50
+      }
+    ]
+  }
+}
+```
+
+- 顶层 `cpu` / `memory` / `disk` 是**当前进程**的占用；`system` 是**操作系统**级占用。
+- `system.cpu.percent` 是所有核心的平均值：第一次请求返回开机以来的平均值，
+  之后按两次请求的 `/proc/stat` 差值计算；`load1/5/15` 来自 `/proc/loadavg`。
+- `system.memory` 来自 `/proc/meminfo`，`usedBytes = totalBytes - availableBytes`
+  （与 `free` 的 used 列一致）。
+- `system.disk` 来自 `/proc/mounts`，只保留 ext2/3/4、xfs、btrfs、zfs、f2fs、
+  vfat、ntfs、overlay 等真实文件系统，按设备去重，最多 20 个挂载点。
+- 容器中的 `/proc` 通常反映**宿主机**；如果平台注入 lxcfs，则是容器配额。
+- token 错误或未配置 CONFIG 时返回 404。token 位于 URL 路径中，反向代理的
+  访问日志可能记录它；如果日志会外泄，建议只在受信网络内调用。
+- 反向代理需要允许该路径的 GET 请求；如果只放行了 WS 路径，主控的指标弹框
+  会读取失败，需要为 `/<token>/config` 增加一条转发规则。
+- `devices` 是当前进程接受的 UUID 数量（静态 UUID + 启用设备）；
+  `activeConnections` 是已认证的 WebSocket 连接数，`activeUUIDs` 按 UUID
+  汇总各自并发连接数（未认证/其他 HTTP 请求不计入）。
+- `cpu.percent` 相对单核计算，可能超过 100。第一次请求返回进程启动以来的
+  平均值，之后按两次请求之间的 CPU 时间差计算；`processSeconds` 是累计 CPU 秒数。
+- `memory.rssBytes` 来自 `/proc/self/statm`，顶层 `disk` 统计二进制所在文件系统。
+  CPU、RSS、磁盘和 `system` 信息目前仅在 Linux 构建中采集，其他平台省略对应字段
+  （`rssBytes` / `disk` / `system` 为 `omitempty`，CPU 数值为 0）。
 - WebSocket 路径（`WS_PATH`）仍要求 `Upgrade: websocket`，普通 HTTP 请求返回 426
 
 ## 主控同步
@@ -236,7 +337,7 @@ Tailscale API token）时，节点在下次上报后停止 tsnet；Tailscale 控
 | 字段 | 来源 |
 | --- | --- |
 | `version` | 构建时通过 `-ldflags -X main.version` 注入的 Release 版本；本地构建为 `dev` |
-| `os` / `arch` | `runtime.GOOS` 与 Release 资产架构（amd64/arm64/armv6/armv7，32 位 ARM 来自 `GOARM`） |
+| `os` / `arch` | `runtime.GOOS` 与 Release 资产架构（仅发布 amd64/arm64） |
 | `tsnetSupported` | 当前二进制是否包含 tsnet；Vercel 构建为 `false` |
 | `tsnetIp` | 内嵌 Tailscale 连接成功后上报的 tailnet IPv4 |
 | `runtime` | `NODE_RUNTIME` / `RUNTIME`，否则根据 `VERCEL`、`RAILWAY_*`、`RENDER_*`、`FLY_APP_NAME`、`KOYEB_*`、`CF_PAGES*`、`ZEABUR*`、`NF_*` 自动判断 |

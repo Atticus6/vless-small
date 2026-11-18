@@ -1,5 +1,5 @@
 # 发布流程：每次 push 读取 version.txt，把最后一段数字 +1 作为本次构建版本，
-# 交叉编译 Linux 多架构二进制并创建 GitHub Release；发布成功后再把新版本号
+# 交叉编译 Linux amd64/arm64 二进制并创建 GitHub Release；发布成功后再把新版本号
 # 写回 version.txt 并推送。
 #
 # 产物命名必须与 install.sh 中的拼接逻辑保持一致：
@@ -91,7 +91,25 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache: true
+          # 与 build 任务共用显式缓存，避免 setup-go 默认 key 在矩阵任务间
+          # 互相覆盖，导致每次只有一个架构命中构建缓存。
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@v6
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-mod-${{ runner.os }}-
+
+      - name: Cache Go build
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-amd64-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-build-${{ runner.os }}-amd64-
 
       # 发布前先跑测试，避免无法构建或测试失败的提交覆盖 Release 资产。
       - name: Vet
@@ -101,18 +119,14 @@ jobs:
         run: go test ./...
 
   build:
-    name: Build ${{ matrix.goos }}/${{ matrix.arch }}
+    name: Build linux/${{ matrix.arch }}
     needs: [test, version]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: true
       matrix:
-        include:
-          - { goos: linux, goarch: amd64, arch: amd64 }
-          - { goos: linux, goarch: arm64, arch: arm64 }
-          # 32 位 ARM 由 GOARM 区分 v6/v7，产物名里用 armv6/armv7 便于用户识别。
-          - { goos: linux, goarch: arm, arch: armv6, goarm: "6" }
-          - { goos: linux, goarch: arm, arch: armv7, goarm: "7" }
+        # 只发布主流 64 位架构；32 位 ARM 交叉编译慢且使用量低，不再构建。
+        arch: [amd64, arm64]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -123,13 +137,30 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-          cache: true
+          # 缓存改为下面的 actions/cache：setup-go 的默认 key 不区分 GOARCH，
+          # 多个矩阵任务会互相覆盖，只能留下一个架构的构建缓存。
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@v6
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-mod-${{ runner.os }}-
+
+      - name: Cache Go build
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-build-${{ runner.os }}-${{ matrix.arch }}-
 
       - name: Build archive
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          GOARM: ${{ matrix.goarm }}
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
           VERSION: ${{ needs.version.outputs.version }}
           ARCH: ${{ matrix.arch }}
         run: |
@@ -137,7 +168,8 @@ jobs:
 
           mkdir -p dist package
           # 版本号通过 -X 注入 main.version，安装后可用 `vless-small -version` 核对。
-          CGO_ENABLED=0 go build -trimpath \
+          # -buildvcs=false 跳过 git 元数据探测，缩短构建时间。
+          CGO_ENABLED=0 go build -trimpath -buildvcs=false \
             -ldflags "-s -w -X main.version=${VERSION}" \
             -o "package/vless-small" .
           cp README.md package/
@@ -150,9 +182,11 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: dist-${{ matrix.goos }}-${{ matrix.arch }}
+          name: dist-linux-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
+          # 产物本身已经是二进制/tar.gz，再压缩耗时且收益很小。
+          compression-level: 0
 
   release:
     name: Publish Release

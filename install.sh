@@ -296,10 +296,8 @@ MACHINE="$(uname -m)"
 case "$MACHINE" in
   x86_64|amd64) ARCH="amd64" ;;
   aarch64|arm64) ARCH="arm64" ;;
-  armv7l|armv7|armhf) ARCH="armv7" ;;
-  armv6l|armv6) ARCH="armv6" ;;
   *)
-    die "暂不支持 CPU 架构 ${MACHINE}"
+    die "Release 仅提供 linux/amd64 与 linux/arm64（当前架构: ${MACHINE}）；其他架构请自行 go build"
     ;;
 esac
 

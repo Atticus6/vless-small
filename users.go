@@ -37,3 +37,14 @@ func parseUUID(s string) ([16]byte, error) {
 	copy(id[:], b)
 	return id, nil
 }
+
+// formatUUID 把 16 字节 UUID 转成标准带连字符的形式.
+func formatUUID(id [16]byte) string {
+	return fmt.Sprintf("%s-%s-%s-%s-%s",
+		hex.EncodeToString(id[0:4]),
+		hex.EncodeToString(id[4:6]),
+		hex.EncodeToString(id[6:8]),
+		hex.EncodeToString(id[8:10]),
+		hex.EncodeToString(id[10:16]),
+	)
+}
