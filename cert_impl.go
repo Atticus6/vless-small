@@ -42,8 +42,9 @@ type certManager struct {
 
 func newCertController(handler http.Handler) certController {
 	return &certManager{
-		handler:   handler,
-		supported: !runningInContainer(),
+		handler: handler,
+		supported: !runningInContainer() &&
+			certRuntimeAllowed(detectRuntime()),
 	}
 }
 

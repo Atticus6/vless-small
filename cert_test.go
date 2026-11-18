@@ -15,3 +15,27 @@ func TestCertControllerDisabledNoop(t *testing.T) {
 		t.Fatalf("domain = %q, want empty", status.Domain)
 	}
 }
+
+func TestCertRuntimeAllowed(t *testing.T) {
+	for _, runtime := range []string{
+		"vercel",
+		"railway",
+		"render",
+		"fly",
+		"koyeb",
+		"cloudflare",
+		"zeabur",
+		"northflank",
+		"NORTHFLANK",
+	} {
+		if certRuntimeAllowed(runtime) {
+			t.Fatalf("certRuntimeAllowed(%q) = true, want false", runtime)
+		}
+	}
+
+	for _, runtime := range []string{"", "local", "linux", "unknown"} {
+		if !certRuntimeAllowed(runtime) {
+			t.Fatalf("certRuntimeAllowed(%q) = false, want true", runtime)
+		}
+	}
+}
