@@ -11,6 +11,18 @@ on:
     # 监听所有分支的推送；tag 推送不会重复触发。
     branches:
       - "**"
+    # 只有会影响二进制或 Release 资产的改动才构建。Dockerfile、vercel.json、
+    # .gitignore、README 等由各自平台/文档流程处理，不再触发发布。
+    paths:
+      - "**/*.go"
+      - "go.mod"
+      - "go.sum"
+      # install.sh 会作为 Release 资产发布，改了需要重新生成 release。
+      - "install.sh"
+      # 手动调整版本号时也允许触发一次发布。
+      - "version.txt"
+  # 只改文档/工作流但需要补一次发布时，可手动触发。
+  workflow_dispatch:
 
 # 同一时间只跑一个发布任务，保证版本号与回写顺序不会互相覆盖。
 concurrency:
