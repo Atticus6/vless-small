@@ -28,21 +28,3 @@ const (
 	// 从主控拉取设备的间隔.
 	nodeSyncInterval = 60 * time.Second
 )
-
-// XHTTP 默认路径。主控订阅固定下发 /xhttp，节点默认保持一致；
-// 需要关闭时显式设置 XHTTP_PATH=none（或 off）。
-const (
-	defaultXHTTPPath   = "/xhttp"
-	xhttpDisabledValue = "none"
-)
-
-// XHTTP packet-up 限制。
-// 单次 POST 上限与 Xray 默认 sc-max-each-post-bytes 对齐；
-// 缓冲上限用于约束乱序上传队列的内存占用。
-const (
-	xhttpPacketMaxBytes     = 4 << 20  // 4 MiB
-	xhttpMaxBufferedPackets = 64       // 乱序包数量上限
-	xhttpMaxBufferedBytes   = 16 << 20 // 16 MiB
-	xhttpMaxSessions        = 256      // 防止随机 session 消耗内存
-	xhttpSessionReapTimeout = 30 * time.Second
-)

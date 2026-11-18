@@ -41,12 +41,8 @@ func main() {
 	if len(users) == 0 && nodeCfg.baseURL == "" {
 		log.Fatal("missing -uuid (or UUID env) or -config (or CONFIG env)")
 	}
-	if cfg.xhttpPath != "" && cfg.xhttpPath == cfg.wsPath {
-		log.Fatal("XHTTP_PATH must differ from WS_PATH")
-	}
 
 	srv := newServer(users, cfg.wsPath)
-	srv.xhttpPath = cfg.xhttpPath
 	startNodeSync(cfg, nodeCfg, srv, users)
 
 	httpServer := &http.Server{
@@ -70,8 +66,8 @@ func main() {
 	}()
 
 	log.Printf(
-		"vless-ws listening on %s (path=%s, xhttp=%s, users=%d)",
-		cfg.listen, displayPath(cfg.wsPath), displayXHTTPPath(cfg.xhttpPath), srv.userCount(),
+		"vless-ws listening on %s (path=%s, users=%d)",
+		cfg.listen, displayPath(cfg.wsPath), srv.userCount(),
 	)
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
@@ -115,13 +111,6 @@ func startNodeSync(cfg config, nodeCfg nodeConfig, srv *server, users map[[16]by
 func displayPath(path string) string {
 	if path == "" {
 		return "*"
-	}
-	return path
-}
-
-func displayXHTTPPath(path string) string {
-	if path == "" {
-		return "disabled"
 	}
 	return path
 }

@@ -36,14 +36,14 @@ UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 REPO="${VLESS_SMALL_REPO:-${DEFAULT_REPO}}"
 VERSION="${VLESS_SMALL_VERSION:-latest}"
 # 私有仓库（默认 Atticus6/vless-small）下载 Release 需要 token；
-# 公开仓库不设置也能安装。
+# 公开仓库不设置也能安装。Web 代理模式使用 --download-base，不需要 GitHub Token。
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+DOWNLOAD_BASE="${VLESS_SMALL_DOWNLOAD_BASE:-}"
 INSTALL_DIR="${INSTALL_DIR:-}"
 CONFIG="${CONFIG:-}"
 UUID="${UUID:-}"
 PORT_ARG="${PORT:-}"
 WS_PATH="${WS_PATH:-}"
-XHTTP_PATH="${XHTTP_PATH:-}"
 PUBLIC_HOSTS="${PUBLIC_HOSTS:-}"
 NODE_RUNTIME="${NODE_RUNTIME:-}"
 # auto = root + systemd 时自动注册服务；yes/no 强制开关。
@@ -52,7 +52,7 @@ UNINSTALL=0
 
 # 有任何配置输入时视为“更新配置”；否则升级时保留已有 env 文件。
 CONFIG_CHANGED=0
-for _value in "$CONFIG" "$UUID" "$PORT_ARG" "$WS_PATH" "$XHTTP_PATH" "$PUBLIC_HOSTS" "$NODE_RUNTIME"; do
+for _value in "$CONFIG" "$UUID" "$PORT_ARG" "$WS_PATH" "$PUBLIC_HOSTS" "$NODE_RUNTIME"; do
   if [ -n "$_value" ]; then
     CONFIG_CHANGED=1
   fi
@@ -79,12 +79,12 @@ vless-small 一键安装脚本
   --uuid VALUE          逗号分隔的静态 VLESS UUID；与 --config 至少提供一个
   --port VALUE          HTTP 监听端口，默认 8080（建议由反向代理转发 443）
   --path VALUE          WebSocket 路径，例如 /ws；默认接受任意路径
-  --xhttp-path VALUE    XHTTP 路径，默认 /xhttp；none/off 表示禁用
   --public-host VALUE   对外域名，可重复；也支持 --public-hosts a,b
   --node-runtime VALUE  节点上报的 runtime 名称，默认自动识别
   --version VALUE       Release 版本，默认 latest
   --repo OWNER/REPO     下载来源仓库，默认 Atticus6/vless-small
-  --github-token VALUE  GitHub Token；私有仓库下载 Release 时必填
+  --download-base URL   资产代理地址（Web 控制台生成）；设置后无需 GitHub Token
+  --github-token VALUE  GitHub Token；直连私有仓库下载时使用
   --install-dir DIR     二进制安装目录；root 默认 /opt/vless-small（服务用户可写，支持自更新），
                         非 root 默认 ~/.local/bin；root 安装会在 /usr/local/bin 建符号链接
   --service             强制注册 systemd 服务（需要 root + systemd）
@@ -93,20 +93,27 @@ vless-small 一键安装脚本
   -h, --help            显示帮助
 
 环境变量:
-  CONFIG / UUID / PORT / WS_PATH / XHTTP_PATH / PUBLIC_HOSTS / NODE_RUNTIME
-  VLESS_SMALL_VERSION / VLESS_SMALL_REPO / VLESS_SMALL_SERVICE
-  GITHUB_TOKEN          私有仓库 token；下载 install.sh 与 Release 资产都依赖它
+  CONFIG / UUID / PORT / WS_PATH / PUBLIC_HOSTS / NODE_RUNTIME
+  VLESS_SMALL_VERSION / VLESS_SMALL_REPO / VLESS_SMALL_DOWNLOAD_BASE / VLESS_SMALL_SERVICE
+  GITHUB_TOKEN          直连私有仓库时使用；Web 代理模式不需要
   INSTALL_DIR           等价于 --install-dir
 
 示例:
-  # 私有仓库：先设置 token，再下载并安装（自动注册 systemd 服务）
+  # Web 控制台代理（推荐，不需要 GitHub Token；命令由“VLESS 管理”页生成）
+  NODE_NAME='hk-01'; NODE_TOKEN='<node token>'; \
+    curl -fsSL -H "Authorization: Bearer $NODE_TOKEN" -H "X-Node-Name: $NODE_NAME" \
+      "https://dsh.example.com/api/releases/v0.1.2/install.sh" \
+    | sudo bash -s -- --config "https://dsh.example.com_hk-01_<node token>" \
+        --version v0.1.2 \
+        --download-base "https://dsh.example.com/api/releases/v0.1.2" --path /ws
+
+  # 直连私有仓库：需要 GitHub Token
   GITHUB_TOKEN='<token>'; curl -fsSL -H "Authorization: token $GITHUB_TOKEN" \
     https://github.com/Atticus6/vless-small/releases/latest/download/install.sh \
     | sudo GITHUB_TOKEN="$GITHUB_TOKEN" bash -s -- \
         --config "https://dsh.example.com_hk_<token>" --path /ws
 
-  # 下面的示例省略了私有仓库的 token 处理；公开 fork 可直接执行，
-  # 私有仓库请按上面的方式给 curl 加 -H，并通过 sudo GITHUB_TOKEN 透传。
+  # 下面的示例省略鉴权；Web 代理/直连私有仓库请按上面的方式处理。
 
   # 升级到最新版（保留已有配置）
   curl -fsSL https://github.com/Atticus6/vless-small/releases/latest/download/install.sh \
@@ -153,12 +160,6 @@ while [ "$#" -gt 0 ]; do
       CONFIG_CHANGED=1
       shift 2
       ;;
-    --xhttp-path)
-      need_value "$@"
-      XHTTP_PATH="$2"
-      CONFIG_CHANGED=1
-      shift 2
-      ;;
     --public-host)
       need_value "$@"
       PUBLIC_HOSTS="${PUBLIC_HOSTS:+${PUBLIC_HOSTS},}$2"
@@ -185,6 +186,11 @@ while [ "$#" -gt 0 ]; do
     --repo)
       need_value "$@"
       REPO="$2"
+      shift 2
+      ;;
+    --download-base)
+      need_value "$@"
+      DOWNLOAD_BASE="$2"
       shift 2
       ;;
     --github-token)
@@ -339,8 +345,6 @@ EFFECTIVE_PORT="$PORT_ARG"
 [ -n "$EFFECTIVE_PORT" ] || EFFECTIVE_PORT="8080"
 EFFECTIVE_WS_PATH="$WS_PATH"
 [ -n "$EFFECTIVE_WS_PATH" ] || EFFECTIVE_WS_PATH="$(env_value WS_PATH)"
-EFFECTIVE_XHTTP_PATH="$XHTTP_PATH"
-[ -n "$EFFECTIVE_XHTTP_PATH" ] || EFFECTIVE_XHTTP_PATH="$(env_value XHTTP_PATH)"
 EFFECTIVE_PUBLIC_HOSTS="$PUBLIC_HOSTS"
 [ -n "$EFFECTIVE_PUBLIC_HOSTS" ] || EFFECTIVE_PUBLIC_HOSTS="$(env_value PUBLIC_HOSTS)"
 EFFECTIVE_NODE_RUNTIME="$NODE_RUNTIME"
@@ -362,7 +366,6 @@ validate_value() {
 if [ -n "$EFFECTIVE_CONFIG" ]; then validate_value CONFIG "$EFFECTIVE_CONFIG"; fi
 if [ -n "$EFFECTIVE_UUID" ]; then validate_value UUID "$EFFECTIVE_UUID"; fi
 if [ -n "$EFFECTIVE_WS_PATH" ]; then validate_value WS_PATH "$EFFECTIVE_WS_PATH"; fi
-if [ -n "$EFFECTIVE_XHTTP_PATH" ]; then validate_value XHTTP_PATH "$EFFECTIVE_XHTTP_PATH"; fi
 if [ -n "$EFFECTIVE_PUBLIC_HOSTS" ]; then validate_value PUBLIC_HOSTS "$EFFECTIVE_PUBLIC_HOSTS"; fi
 if [ -n "$EFFECTIVE_NODE_RUNTIME" ]; then validate_value NODE_RUNTIME "$EFFECTIVE_NODE_RUNTIME"; fi
 
@@ -403,7 +406,12 @@ resolve_latest_version() {
   printf '%s\n' "$tag"
 }
 
-if [ "$VERSION" = "latest" ] || [ -z "$VERSION" ]; then
+# Web 代理模式必须带具体版本：脚本不再向 GitHub 查询 latest。
+if [ -n "$DOWNLOAD_BASE" ] && { [ "$VERSION" = "latest" ] || [ -z "$VERSION" ]; }; then
+  die "使用 --download-base 时需要同时指定 --version"
+fi
+
+if [ -z "$DOWNLOAD_BASE" ] && { [ "$VERSION" = "latest" ] || [ -z "$VERSION" ]; }; then
   info "查询最新 Release 版本"
   VERSION="$(resolve_latest_version)" \
     || die "无法获取最新版本；请用 --version 指定，例如 --version v1.0.0"
@@ -415,15 +423,37 @@ case "$VERSION" in
 esac
 
 ASSET="vless-small_${VERSION}_${OS}_${ARCH}.tar.gz"
-DOWNLOAD_BASE="https://github.com/${REPO}/releases/download/${VERSION}"
+if [ -z "$DOWNLOAD_BASE" ]; then
+  DOWNLOAD_BASE="https://github.com/${REPO}/releases/download/${VERSION}"
+fi
+DOWNLOAD_BASE="${DOWNLOAD_BASE%/}"
+
+# Web 代理模式：用 CONFIG 里的节点 name+token 鉴权，不再需要 GitHub Token。
+PROXY_NAME=""
+PROXY_TOKEN=""
+if [ -n "$DOWNLOAD_BASE" ] && [ -n "${EFFECTIVE_CONFIG:-}" ]; then
+  PROXY_TOKEN="${EFFECTIVE_CONFIG##*_}"
+  PROXY_REST="${EFFECTIVE_CONFIG%_*}"
+  PROXY_NAME="${PROXY_REST##*_}"
+fi
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/vless-small.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-# 私有仓库的 install.sh 与 Release 资产都要求 Authorization；公开仓库不带 token 也能下载。
+# 直连私有仓库用 GITHUB_TOKEN；Web 代理模式用节点 token，二者都不写入日志。
 download() {
   local url="$1"
   local out="$2"
+
+  if [ -n "${DOWNLOAD_BASE:-}" ]; then
+    [ -n "$PROXY_NAME" ] && [ -n "$PROXY_TOKEN" ] \
+      || die "使用 --download-base 时需要 --config（节点 name+token）"
+    curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 \
+      -H "Authorization: Bearer ${PROXY_TOKEN}" \
+      -H "X-Node-Name: ${PROXY_NAME}" \
+      -o "$out" "$url"
+    return
+  fi
 
   if [ -n "${GITHUB_TOKEN:-}" ]; then
     curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 \
@@ -435,9 +465,9 @@ download() {
 
 info "下载 ${ASSET}"
 download "${DOWNLOAD_BASE}/${ASSET}" "${TMP_DIR}/${ASSET}" \
-  || die "下载失败: ${DOWNLOAD_BASE}/${ASSET}（私有仓库请提供 --github-token 或 GITHUB_TOKEN）"
+  || die "下载失败: ${DOWNLOAD_BASE}/${ASSET}（Web 代理请检查节点 token；直连请提供 --github-token 或 GITHUB_TOKEN）"
 download "${DOWNLOAD_BASE}/checksums.txt" "${TMP_DIR}/checksums.txt" \
-  || die "下载 checksums.txt 失败（私有仓库请提供 --github-token 或 GITHUB_TOKEN）"
+  || die "下载 checksums.txt 失败（Web 代理请检查节点 token；直连请提供 --github-token 或 GITHUB_TOKEN）"
 
 # 兼容 sha256sum 的两种输出：文本模式 "hash  file"，二进制模式 "hash *file"。
 EXPECTED="$(awk -v name="$ASSET" '{
@@ -497,7 +527,6 @@ write_env_file() {
     if [ -n "$EFFECTIVE_UUID" ]; then echo "UUID=${EFFECTIVE_UUID}"; fi
     echo "PORT=${EFFECTIVE_PORT}"
     if [ -n "$EFFECTIVE_WS_PATH" ]; then echo "WS_PATH=${EFFECTIVE_WS_PATH}"; fi
-    if [ -n "$EFFECTIVE_XHTTP_PATH" ]; then echo "XHTTP_PATH=${EFFECTIVE_XHTTP_PATH}"; fi
     if [ -n "$EFFECTIVE_PUBLIC_HOSTS" ]; then echo "PUBLIC_HOSTS=${EFFECTIVE_PUBLIC_HOSTS}"; fi
     if [ -n "$EFFECTIVE_NODE_RUNTIME" ]; then echo "NODE_RUNTIME=${EFFECTIVE_NODE_RUNTIME}"; fi
   } >"$tmp"
@@ -635,7 +664,6 @@ if [ -n "${EFFECTIVE_CONFIG}" ] || [ -n "${EFFECTIVE_UUID}" ]; then
   if [ -n "${EFFECTIVE_UUID}" ]; then echo "  export UUID='${EFFECTIVE_UUID}'"; fi
   echo "  export PORT=${EFFECTIVE_PORT}"
   if [ -n "${EFFECTIVE_WS_PATH}" ]; then echo "  export WS_PATH='${EFFECTIVE_WS_PATH}'"; fi
-  if [ -n "${EFFECTIVE_XHTTP_PATH}" ]; then echo "  export XHTTP_PATH='${EFFECTIVE_XHTTP_PATH}'"; fi
   if [ -n "${EFFECTIVE_PUBLIC_HOSTS}" ]; then echo "  export PUBLIC_HOSTS='${EFFECTIVE_PUBLIC_HOSTS}'"; fi
   if [ -n "${EFFECTIVE_NODE_RUNTIME}" ]; then echo "  export NODE_RUNTIME='${EFFECTIVE_NODE_RUNTIME}'"; fi
   echo "  ${BIN_PATH}"

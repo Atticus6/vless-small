@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"net"
 	"strconv"
 )
@@ -78,72 +76,5 @@ func parseRequest(b []byte) (id [16]byte, cmd byte, target string, payload []byt
 
 	target = net.JoinHostPort(host, strconv.Itoa(int(port)))
 	payload = b[off:]
-	return
-}
-
-// parseRequestStream 从字节流中读取 VLESS 请求头.
-// 与 parseRequest 的区别是：只消费头部，early data 留在 bufio.Reader 中，
-// 供后续 TCP/UDP relay 直接读取.
-func parseRequestStream(r *bufio.Reader) (id [16]byte, cmd byte, target string, err error) {
-	head := make([]byte, 18)
-	if _, err = io.ReadFull(r, head); err != nil {
-		return
-	}
-	if head[0] != vlessVersion {
-		err = fmt.Errorf("unsupported version: %d", head[0])
-		return
-	}
-	copy(id[:], head[1:17])
-
-	addonLen := int(head[17])
-	if addonLen > 0 {
-		if _, err = io.CopyN(io.Discard, r, int64(addonLen)); err != nil {
-			return
-		}
-	}
-
-	fixed := make([]byte, 4)
-	if _, err = io.ReadFull(r, fixed); err != nil {
-		return
-	}
-	cmd = fixed[0]
-	port := binary.BigEndian.Uint16(fixed[1:3])
-	atyp := fixed[3]
-
-	var host string
-	switch atyp {
-	case atypIPv4:
-		b := make([]byte, 4)
-		if _, err = io.ReadFull(r, b); err != nil {
-			return
-		}
-		host = net.IP(b).String()
-	case atypDomain:
-		n, readErr := r.ReadByte()
-		if readErr != nil {
-			err = readErr
-			return
-		}
-		b := make([]byte, int(n))
-		if _, err = io.ReadFull(r, b); err != nil {
-			return
-		}
-		host = string(b)
-	case atypIPv6:
-		b := make([]byte, 16)
-		if _, err = io.ReadFull(r, b); err != nil {
-			return
-		}
-		host = net.IP(b).String()
-	default:
-		err = fmt.Errorf("unsupported address type: %d", atyp)
-		return
-	}
-	if host == "" {
-		err = fmt.Errorf("empty target host")
-		return
-	}
-
-	target = net.JoinHostPort(host, strconv.Itoa(int(port)))
 	return
 }

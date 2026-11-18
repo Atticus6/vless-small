@@ -11,11 +11,9 @@
 | --- | --- |
 | `main.go` | 启动流程、节点同步调度、优雅退出 |
 | `config.go` | 命令行/环境变量解析、路径规范化 |
-| `server.go` | 服务器状态、用户表、健康检查、WS/XHTTP 分流 |
+| `server.go` | 服务器状态、用户表、健康检查、WS 处理 |
 | `websocket.go` | WebSocket 握手、TCP/UDP 转发、心跳 |
-| `xhttp.go` | XHTTP stream-one 请求与 TCP/UDP 字节流转发 |
-| `xhttp_packet.go` | XHTTP packet-up 会话、上传队列与下载流 |
-| `protocol.go` | VLESS 请求头解析（内存缓冲与流式两种） |
+| `protocol.go` | VLESS 请求头解析（内存缓冲） |
 | `node.go` | CONFIG 解析、节点上报、设备同步 |
 | `update.go` | 版本比较、自更新下载、sha256 校验与原子替换 |
 | `tsnet_common.go` | tsnet 开关类型、hostname 清洗与控制器接口 |
@@ -46,14 +44,13 @@ go run . -uuid 14725836-1234-5678-9abc-def012345678 -listen :8080 -path /ws
 | `-listen` / `PORT` | `:8080` | 监听地址；`PORT=9000` 时监听 `:9000` |
 | `-uuid` / `UUID` | — | 逗号分隔的静态 UUID；设置 `CONFIG` 时可选 |
 | `-path` / `WS_PATH` | 空（任意路径） | 只接受指定 WS 路径，如 `/ws` |
-| `-xhttp-path` / `XHTTP_PATH` | `/xhttp` | XHTTP 路径；设为 `none` / `off` 可禁用 |
 | `-config` / `CONFIG` | — | `<baseURL>_<name>_<token>`，用于向主控上报并同步设备 |
 | `-version` | `dev` | 打印版本；Release 构建通过 `-ldflags -X main.version` 注入 tag |
 
 ## 一键安装
 
-版本号以 `version.txt` 为准。每次 push（任意分支）都会触发 GitHub Actions
-（`.github/workflows/release.yml`）：
+版本号以 `version.txt` 为准。push 命中 Go 源码、`go.mod`/`go.sum`、`install.sh`
+或 `version.txt` 时触发 GitHub Actions（`.github/workflows/release.yml`）：
 
 1. 读取 `version.txt`，把最后一段数字 +1 作为本次版本号
    （`v0.1.0` → `v0.1.1`，`1` → `2`）；
@@ -65,19 +62,23 @@ go run . -uuid 14725836-1234-5678-9abc-def012345678 -listen :8080 -path /ws
 不需要手动打 tag 或改版本号。如果要调整版本序列，直接修改 `version.txt`
 并推送，workflow 会从该值继续 +1。
 
-仓库是私有的，安装脚本和 Release 资产都需要一个有 `Contents: Read` 权限的
-GitHub Token。Linux 上安装为 systemd 服务（需要 root）：
+仓库是私有的。Web 控制台的“VLESS 管理”页会生成一条通过主控代理下载的
+安装命令，节点上不需要 GitHub Token（Worker 用自己的 `GITHUB_TOKEN`
+访问私有 Release）：
 
 ```bash
-GITHUB_TOKEN='<github token>'; \
-  curl -fsSL -H "Authorization: token $GITHUB_TOKEN" \
-    https://github.com/Atticus6/vless-small/releases/latest/download/install.sh \
-  | sudo GITHUB_TOKEN="$GITHUB_TOKEN" bash -s -- \
-      --config "https://dsh.example.com_hk_<token>" --path /ws
+NODE_NAME='hk-01'; NODE_TOKEN='<node token>'; \
+  curl -fsSL -H "Authorization: Bearer $NODE_TOKEN" -H "X-Node-Name: $NODE_NAME" \
+    "https://dsh.example.com/api/releases/v0.1.2/install.sh" \
+  | sudo bash -s -- --config "https://dsh.example.com_hk-01_<node token>" \
+      --version v0.1.2 \
+      --download-base "https://dsh.example.com/api/releases/v0.1.2" --path /ws
 ```
 
-也可以直接在控制台的“VLESS 管理”页点击“复制安装命令”，会自动填入当前节点
-的 CONFIG 和 Web 配置的 `GITHUB_TOKEN`。
+直接点页面上的“复制安装命令”即可，版本会自动取当前最新 Release。
+如果直连 GitHub（公开 fork 或本地有可用 token），仍可使用
+`--github-token` / `GITHUB_TOKEN`；私有仓库在部分网络下直链可能 404，
+优先使用上面的主控代理。
 
 脚本按 `uname` 选择对应资产并校验 sha256，创建 `vless-small` 系统用户，把配置
 写入 `/etc/vless-small/vless-small.env`（0600），注册
@@ -89,18 +90,18 @@ GITHUB_TOKEN='<github token>'; \
 | `--config` / `--uuid` | 主控 CONFIG 或静态 UUID，至少提供一个 |
 | `--port` | 监听端口，默认 8080 |
 | `--path` | WebSocket 路径，如 `/ws`；不填则接受任意路径 |
-| `--xhttp-path` | XHTTP 路径，默认 `/xhttp`；`none` 禁用 |
 | `--public-host` / `--public-hosts` | 上报的公网域名，可重复或逗号分隔 |
 | `--node-runtime` | 节点上报的 runtime，默认自动识别 |
-| `--version` | 指定 Release 版本，默认 latest |
-| `--github-token` | 私有仓库 token；也可用环境变量 `GITHUB_TOKEN` |
+| `--version` | 指定 Release 版本，默认 latest；使用 `--download-base` 时必填 |
+| `--download-base` | Release 资产代理地址（Web 控制台生成）；设置后不需要 GitHub Token |
+| `--github-token` | 直连私有仓库时的 GitHub Token；Web 代理模式不需要 |
 | `--install-dir` | 二进制目录；root 默认 `/opt/vless-small`（服务用户可写，支持自更新），非 root 默认 `~/.local/bin`；root 安装会在 `/usr/local/bin` 建符号链接 |
 | `--service` / `--no-service` | 强制或禁止注册 systemd 服务 |
 | `--uninstall` | 停止服务并删除配置与二进制 |
 
 ```bash
-# 下面的示例省略了私有仓库的 token；请像上面一样给 curl 加 -H，
-# 并通过 sudo GITHUB_TOKEN 传给安装脚本。
+# 下面的示例省略鉴权；Web 代理请像上面一样带节点 Authorization /
+# X-Node-Name，直连私有仓库请用 GitHub Token。
 
 # 升级：不带配置参数时保留已有 env 文件
 curl -fsSL https://github.com/Atticus6/vless-small/releases/latest/download/install.sh \
@@ -124,7 +125,7 @@ vless-small -version   # 查看已安装版本
 ```
 
 > 本服务不内置 TLS。生产环境请放在 Nginx / Caddy / Cloudflare 之后，并配置
-> WebSocket Upgrade 与较长的读超时；订阅默认使用 443 + `/ws` + `/xhttp`。
+> WebSocket Upgrade 与较长的读超时；订阅默认使用 443 + `/ws`。
 
 ## 自动更新（Web 下发）
 
@@ -190,43 +191,6 @@ Tailscale API token）时，节点在下次上报后停止 tsnet；Tailscale 控
 > tsnet 使用用户态网络栈，tailnet IP 上的服务由内嵌 listener 提供，不会自动
 > 暴露公网 `:8080`；公网入口仍走原有的 TLS 反向代理。
 
-## XHTTP
-
-XHTTP 默认启用，路径为 `/xhttp`，支持两种模式：
-
-- **stream-one**：`POST /xhttp`，请求体承载上行、响应体承载下行，适合直连或常驻容器。
-- **packet-up**：`POST /xhttp/{session}/{seq}` 发送上传分片，`GET /xhttp/{session}` 接收下载流。
-  每个 POST 都是完整请求，适合会缓冲请求体的 Serverless 平台（如 Vercel）。
-
-packet-up 会话 30 秒内没有下载 GET 会被清理；上传队列最多缓冲 64 个乱序包、16 MiB。
-主控订阅会按节点 runtime 自动选择模式：Vercel 使用 packet-up，其他节点使用 stream-one。
-
-主控订阅会同时下发 WS 与 XHTTP 节点，节点默认路径与订阅里的 `/xhttp` 一致，因此无需额外配置：
-
-```bash
-CONFIG=... go run .
-```
-
-需要禁用 XHTTP 时设置 `XHTTP_PATH=none`；改路径则设置如 `XHTTP_PATH=/custom`，
-并同步修改主控的节点路径（当前订阅固定为 `/xhttp`）。
-
-Vercel Functions 会缓冲完整请求体，不能使用 stream-one；Serverless 平台请使用
-packet-up 的 XHTTP 节点。packet-up 的下载 GET 需要持续流式响应，Vercel 已验证可用。
-
-Xray 客户端示例（`network` 用 `xhttp` 或旧名 `splithttp`）：
-```json
-{
-  "network": "xhttp",
-  "xhttpSettings": {
-    "path": "/xhttp",
-    "mode": "stream-one"
-  }
-}
-```
-
-stream-one 需要端到端支持双向流式传输（直连 TLS/REALITY 或 HTTP/2）；经 Nginx/Cloudflare
-时请使用 gRPC 透传配置，普通 HTTP/1.1 反向代理可能缓冲请求体导致失败。
-
 ## HTTP 健康检查
 
 - `GET /` 返回 `vless-small ok`
@@ -283,7 +247,8 @@ vless://<DEVICE_ID>@<HOST>:<PORT>?encryption=none&security=none&type=ws&path=%2F
 
 ## 说明
 
-- 依赖只有 `github.com/gorilla/websocket`。
+- 基础依赖只有 `github.com/gorilla/websocket`；非 Vercel 构建额外包含
+  `tailscale.com/tsnet`，Vercel 构建使用 `-tags vercel` 剔除。
 - 每条连接首条 WS 消息是 VLESS 请求头，响应头为 `[0x00, 0x00]`。
 - 支持 `cmd=1`（TCP）与 `cmd=2`（UDP，`[2B 长度][数据]` 分包）。
 - 服务端每 25s 发一次 WS ping，客户端回 pong 即续期 60s 读超时。
