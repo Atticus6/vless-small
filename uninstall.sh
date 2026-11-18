@@ -9,7 +9,6 @@
 #
 # 默认清理 systemd 服务、/etc/vless-small、/opt/vless-small 和
 # /usr/local/bin/vless-small 符号链接；非 root 安装只清理用户目录。
-# Tailscale 的 tsnet 状态存在主控数据库，不在本脚本清理范围内。
 
 if [ -z "${BASH_VERSION:-}" ]; then
   echo "uninstall.sh 需要 bash" >&2

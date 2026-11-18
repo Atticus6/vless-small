@@ -12,7 +12,6 @@
 | `main.go` | 组装 `app`/`tunnel`/`cert`，启动 HTTP 服务与优雅退出 |
 | `config.go` | 命令行/环境变量解析、路径规范化 |
 | `internal/app/` | 核心服务：`server.go`（用户表、健康检查）、`websocket.go`、`protocol.go`、`node.go`（CONFIG、上报、设备同步）、`push.go`、`update.go`、`platform.go`、`users.go`、`constants.go` |
-| `internal/tsnet/` | 内嵌 Tailscale：`tsnet_common.go`、`tsnet_impl.go`、`tsnet_stub.go` |
 | `internal/tunnel/` | 内嵌 cloudflared 临时隧道：`tunnel_common.go`、`tunnel_impl.go`、`tunnel_stub.go` |
 | `internal/cert/` | ACME 自动证书：`cert_common.go`、`cert_impl.go`、`cert_stub.go` |
 | `internal/platform/` | 运行平台识别（local / Vercel / Railway / Northflank 等） |
@@ -176,34 +175,6 @@ docker run -d --restart=always --name vless-small \
 首轮升级：旧版本节点不认识 `update` 字段，需要手动重跑一次安装脚本或更新
 镜像，之后 Web 按钮才会生效。SaaS 自动休眠运行时（Vercel/Railway）不会后台
 轮询，Web 会拒绝下发。
-
-## Tailscale（tsnet）
-
-非 Vercel 构建内置 [tsnet](https://tailscale.com/kb/1244/tsnet)，节点会作为一台
-Tailscale 设备自动加入 tailnet。Vercel 构建使用 `-tags vercel`，完全不编译
-tsnet（`vercel.json` 的 `buildCommand` 已加该 tag）。
-
-自动加入条件（三条同时满足，主控每次上报重新判断）：
-
-1. 节点二进制包含 tsnet（`tsnetSupported=true`，即非 Vercel 构建）；
-2. 运行时长期驻留（Vercel / Railway 会自动休眠，不加入）；
-3. Web 已配置 Tailscale API token（设置页），可签发 auth key。
-
-满足后主控在 `/api/nodes/report` 响应里返回 `tsnet.enabled=true`；节点随即：
-
-1. `GET /api/nodes/tsnet?name=...`（Bearer name+token）拉取 auth key、
-   `tailscaled.state`、`tailscaled.log.conf`；
-2. 把这些文件恢复到临时状态目录，以清洗后的节点名作为 hostname 启动 tsnet；
-3. 在 tailnet 上监听 `:8080`，复用同一个 HTTP handler（健康检查/WS）；
-4. 启动后和每 5 分钟把状态文件变化 `PUT /api/nodes/tsnet` 回写主控。
-
-主控把状态存在 D1 的 `vless_tsnet_state` 表（base64），因此实例/容器重建后
-仍复用同一台 Tailscale 设备，不会反复注册新设备。条件不再满足（例如删除
-Tailscale API token）时，节点在下次上报后停止 tsnet；Tailscale 控制台里的
-设备记录不会自动删除，需要手动清理。
-
-> tsnet 使用用户态网络栈，tailnet IP 上的服务由内嵌 listener 提供，不会自动
-> 暴露公网 `:8080`；公网入口仍走原有的 TLS 反向代理。
 
 ## 临时隧道（cloudflared）
 
@@ -393,16 +364,14 @@ curl -fsS "http://127.0.0.1:8080/${TOKEN}/config"
 | --- | --- |
 | `version` | 构建时通过 `-ldflags -X main.version` 注入的 Release 版本；本地构建为 `dev` |
 | `os` / `arch` | `runtime.GOOS` 与 Release 资产架构（仅发布 amd64/arm64） |
-| `tsnetSupported` | 当前二进制是否包含 tsnet；Vercel 构建为 `false` |
-| `tsnetIp` | 内嵌 Tailscale 连接成功后上报的 tailnet IPv4 |
 | `cert` | 自动证书状态；主控据此写入 `cert_*` 并生成证书节点 |
 | `runtime` | `NODE_RUNTIME` / `RUNTIME`，否则根据 `VERCEL`、`RAILWAY_*`、`RENDER_*`、`FLY_APP_NAME`、`KOYEB_*`、`CF_PAGES*`、`ZEABUR*`、`NF_*` 自动判断 |
 | `hosts` | `PUBLIC_HOSTS`（逗号分隔）/ `PUBLIC_HOST`，否则读取平台分配的公网域名；Northflank 使用 `NF_HOSTS` |
+| `ipv4` / `ipv6` | 本机公网 IP 查询；可用 `NODE_IPV4` / `NODE_IPV6` 覆盖 |
+| `countryCode` / `latitude` / `longitude` | 本机 IP 查询结果 |
 
 只采集稳定的公网地址：Vercel 使用 `VERCEL_PROJECT_PRODUCTION_URL`（忽略每次部署变化的 `VERCEL_URL`）；
 Cloudflare Pages 不使用 `CF_PAGES_URL`（单次部署地址），请通过 `PUBLIC_HOST` 手动指定生产域名。
-| `ipv4` / `ipv6` | 本机公网 IP 查询；可用 `NODE_IPV4` / `NODE_IPV6` 覆盖 |
-| `countryCode` / `latitude` / `longitude` | 本机 IP 查询结果 |
 
 IP 查询默认请求 `https://ipinfo.io/json`，可用 `IP_LOOKUP_URL` 指向其他服务。
 `name` 和 `token` 中不要包含下划线（`CONFIG` 使用下划线分隔）。
@@ -434,8 +403,8 @@ vless://<DEVICE_ID>@<HOST>:<PORT>?encryption=none&security=none&type=ws&path=%2F
 ## 说明
 
 - 基础依赖只有 `github.com/gorilla/websocket`；非 Vercel 构建额外包含
-  `tailscale.com/tsnet` 和 `github.com/cloudflare/cloudflared`（临时隧道），
-  Vercel 构建使用 `-tags vercel` 同时剔除两者。
+  `github.com/cloudflare/cloudflared`（临时隧道），Vercel 构建使用
+  `-tags vercel` 剔除该依赖。
 - 每条连接首条 WS 消息是 VLESS 请求头，响应头为 `[0x00, 0x00]`。
 - 支持 `cmd=1`（TCP）与 `cmd=2`（UDP，`[2B 长度][数据]` 分包）。
 - 服务端每 25s 发一次 WS ping，客户端回 pong 即续期 60s 读超时。

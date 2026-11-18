@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/atticus6/vless-small/internal/cert"
-	"github.com/atticus6/vless-small/internal/tsnet"
 	"github.com/atticus6/vless-small/internal/tunnel"
 	"github.com/gorilla/websocket"
 )
@@ -504,8 +503,11 @@ func TestSyncDevices(t *testing.T) {
 		if body["os"] == "" || body["arch"] == "" {
 			t.Errorf("report os/arch missing: %#v", body)
 		}
-		if body["tsnetSupported"] != tsnet.Supported() {
-			t.Errorf("report tsnetSupported = %v, want %v", body["tsnetSupported"], tsnet.Supported())
+		// tsnet 支持已移除，上报里不应再出现相关字段。
+		for _, key := range []string{"tsnetSupported", "tsnetIp"} {
+			if _, ok := body[key]; ok {
+				t.Errorf("report should not contain %s: %#v", key, body)
+			}
 		}
 		if _, ok := body["tunnel"].(map[string]any); !ok {
 			t.Errorf("report tunnel missing: %#v", body["tunnel"])
@@ -532,7 +534,7 @@ func TestSyncDevices(t *testing.T) {
 
 	result, err := syncDevices(
 		cfg, srv, ":8080", "/ws", static, nodeInfo{runtime: "vless-small"},
-		"", tunnel.Report{}, cert.Report{},
+		tunnel.Report{}, cert.Report{},
 	)
 	if err != nil {
 		t.Fatalf("syncDevices: %v", err)
