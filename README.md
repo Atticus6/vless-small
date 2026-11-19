@@ -11,7 +11,7 @@
 | --- | --- |
 | `main.go` | 组装 `app`/`tunnel`/`cert`，启动 HTTP 服务与优雅退出 |
 | `config.go` | 命令行/环境变量解析、路径规范化 |
-| `internal/app/` | 核心服务：`server.go`（用户表、健康检查）、`websocket.go`、`protocol.go`、`node.go`（CONFIG、上报、设备同步）、`push.go`、`update.go`、`platform.go`、`users.go`、`constants.go`；`egress*.go` 负责出口 IP 检测与 `/ipN` 路径选择 |
+| `internal/app/` | 核心服务：`server.go`（用户表、健康检查）、`websocket.go`、`protocol.go`、`node.go`（CONFIG、上报、设备同步）、`push.go`、`update.go`、`platform.go`、`users.go`、`constants.go`；`egress*.go` 负责出口 IP 检测与 `/ipN` 路径选择，`traffic.go` 负责按设备统计与上报流量 |
 | `internal/quicktunnel/` | 纯 Go Quick Tunnel 客户端：Cap'n Proto RPC、QUIC 边缘连接、HTTP/WebSocket 转发 |
 | `internal/tunnel/` | 临时隧道控制器：`tunnel_common.go`、`tunnel_impl.go`、`tunnel_stub.go` |
 | `internal/cert/` | ACME 自动证书：`cert_common.go`、`cert_impl.go`、`cert_stub.go` |
@@ -222,6 +222,36 @@ docker run -d --restart=always --name vless-small \
 `GET /<token>/config` 的 `egress` 字段会返回当前检测结果和开关状态。
 出口列表在进程启动时检测；网卡地址变化后需要重启 vless-small。
 指定出口的连接只走 IPv4；目标为 IPv6 字面量时会连接失败，普通 `/ws` 不受影响。
+
+## 用户流量统计
+
+节点按已认证的 VLESS UUID 统计转发的 payload 字节：
+
+- TCP：WebSocket → 目标为上传，目标 → WebSocket 为下载；
+- UDP：按 datagram payload 统计，不含 2 字节长度前缀；
+- 多条并发连接按 UUID 原子累加。
+
+每 30 分钟向主控 `POST /api/nodes/traffic` 上报一次：
+
+```json
+{
+  "name": "hk",
+  "traffic": [
+    { "id": "14725836-1234-5678-9abc-def012345678", "up": 1024, "down": 2048 }
+  ]
+}
+```
+
+- 每批最多 200 个设备，避免 Worker 聚合后的用户数据点超过 Analytics Engine
+  单次 250 点限制；
+- 上报成功才清空累计值；某一批失败时回滚该批及后续批次，下一轮重试；
+- 进程收到 SIGTERM 时会尽量 `FlushTraffic` 一次；自更新直接退出，最多丢失
+  当前 30 分钟窗口；
+- Vercel/Railway 等自动休眠运行时没有常驻进程，不启动 30 分钟上报循环。
+
+主控不查询设备归属，直接把每条记录写入 Analytics Engine：`blob1` 是设备
+UUID，`blob2` 是节点 id，`double1/2` 是上传/下载字节，时间由 Analytics
+Engine 自动记录。设备或节点已不存在时也照常写入。
 
 ## 临时隧道（Quick Tunnel）
 

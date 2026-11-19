@@ -82,9 +82,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	log.Printf("open %s (cmd=%d, path=%s, egress=%s)", r.RemoteAddr, cmd, r.URL.Path, egress)
 	switch cmd {
 	case cmdTCP:
-		s.relayTCP(ws, target, payload, sourceIP)
+		s.relayTCP(ws, target, payload, sourceIP, id)
 	case cmdUDP:
-		s.relayUDP(ws, target, payload, sourceIP)
+		s.relayUDP(ws, target, payload, sourceIP, id)
 	default:
 		log.Printf("unsupported command %d from %s", cmd, r.RemoteAddr)
 	}
@@ -125,8 +125,14 @@ func pingLoop(ws *websocket.Conn, stop <-chan struct{}) {
 }
 
 // relayTCP 双向转发: WebSocket <-> 目标 TCP. 仅本 goroutine 写 WS 数据帧.
-// sourceIP 非空时绑定该本地地址作为出站源 IP。
-func (s *Server) relayTCP(ws *websocket.Conn, target string, early []byte, sourceIP net.IP) {
+// sourceIP 非空时绑定该本地地址作为出站源 IP；userID 用于累计流量。
+func (s *Server) relayTCP(
+	ws *websocket.Conn,
+	target string,
+	early []byte,
+	sourceIP net.IP,
+	userID [16]byte,
+) {
 	conn, err := dialOutbound("tcp", target, sourceIP)
 	if err != nil {
 		log.Printf("dial %s from %s: %v", target, sourceIP, err)
@@ -144,6 +150,7 @@ func (s *Server) relayTCP(ws *websocket.Conn, target string, early []byte, sourc
 			log.Printf("write early data %s: %v", target, err)
 			return
 		}
+		s.addTraffic(userID, uint64(len(early)), 0)
 	}
 
 	// WS -> 目标; 出错时关 conn, 让下面的读循环退出.
@@ -162,6 +169,7 @@ func (s *Server) relayTCP(ws *websocket.Conn, target string, early []byte, sourc
 			if _, err := conn.Write(data); err != nil {
 				return
 			}
+			s.addTraffic(userID, uint64(len(data)), 0)
 		}
 	}()
 
@@ -170,6 +178,7 @@ func (s *Server) relayTCP(ws *websocket.Conn, target string, early []byte, sourc
 	for {
 		n, err := conn.Read(buf)
 		if n > 0 {
+			s.addTraffic(userID, 0, uint64(n))
 			if err := writeMessage(ws, buf[:n]); err != nil {
 				return
 			}
@@ -182,8 +191,14 @@ func (s *Server) relayTCP(ws *websocket.Conn, target string, early []byte, sourc
 
 // relayUDP 转发 VLESS UDP 会话.
 // 包格式: [2B 大端长度][payload], 一个 WS 消息里可以拼接多个包.
-// sourceIP 非空时绑定该本地地址作为出站源 IP。
-func (s *Server) relayUDP(ws *websocket.Conn, target string, early []byte, sourceIP net.IP) {
+// sourceIP 非空时绑定该本地地址作为出站源 IP；userID 用于累计流量。
+func (s *Server) relayUDP(
+	ws *websocket.Conn,
+	target string,
+	early []byte,
+	sourceIP net.IP,
+	userID [16]byte,
+) {
 	conn, err := dialOutbound("udp", target, sourceIP)
 	if err != nil {
 		log.Printf("dial udp %s from %s: %v", target, sourceIP, err)
@@ -196,7 +211,11 @@ func (s *Server) relayUDP(ws *websocket.Conn, target string, early []byte, sourc
 	}
 	framer := &udpFramer{}
 	if len(early) > 0 {
-		if err := framer.feed(conn, early); err != nil {
+		written, err := framer.feed(conn, early)
+		if written > 0 {
+			s.addTraffic(userID, uint64(written), 0)
+		}
+		if err != nil {
 			return
 		}
 	}
@@ -210,7 +229,11 @@ func (s *Server) relayUDP(ws *websocket.Conn, target string, early []byte, sourc
 			}
 			_ = ws.SetReadDeadline(time.Now().Add(readTimeout))
 			if len(data) > 0 {
-				if err := framer.feed(conn, data); err != nil {
+				written, err := framer.feed(conn, data)
+				if written > 0 {
+					s.addTraffic(userID, uint64(written), 0)
+				}
+				if err != nil {
 					return
 				}
 			}
@@ -228,6 +251,7 @@ func (s *Server) relayUDP(ws *websocket.Conn, target string, early []byte, sourc
 		if n == 0 {
 			continue
 		}
+		s.addTraffic(userID, 0, uint64(n))
 		binary.BigEndian.PutUint16(buf[:2], uint16(n))
 		if err := writeMessage(ws, buf[:2+n]); err != nil {
 			return
@@ -241,21 +265,24 @@ type udpFramer struct {
 	buf []byte
 }
 
-func (f *udpFramer) feed(conn net.Conn, data []byte) error {
+// feed 把字节流拆成 UDP payload 并写入目标，返回成功写入的 payload 字节数。
+func (f *udpFramer) feed(conn net.Conn, data []byte) (int, error) {
 	f.buf = append(f.buf, data...)
+	written := 0
 	for {
 		if len(f.buf) < 2 {
-			return nil
+			return written, nil
 		}
 		n := int(binary.BigEndian.Uint16(f.buf[:2]))
 		if len(f.buf) < 2+n {
-			return nil
+			return written, nil
 		}
 		if n > 0 {
 			_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 			if _, err := conn.Write(f.buf[2 : 2+n]); err != nil {
-				return err
+				return written, err
 			}
+			written += n
 			// 上行数据也算会话活跃, 避免只发不收时被 idle 超时误杀.
 			_ = conn.SetReadDeadline(time.Now().Add(udpIdleTimeout))
 		}

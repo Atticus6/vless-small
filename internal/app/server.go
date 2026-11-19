@@ -57,6 +57,9 @@ type Server struct {
 	egress *egressSelector
 	// egressEnabled 由主控开关控制，默认关闭；关闭时 /ipN 不生效。
 	egressEnabled atomic.Bool
+
+	// traffic 按设备 UUID 累计待上报的上下行字节。
+	traffic *trafficCounter
 }
 
 // healthResponse 是 /healthz 的响应，只保留探活必需的信息。
@@ -173,7 +176,8 @@ func NewServer(users map[[16]byte]struct{}, path string) *Server {
 		staticUsers: make(map[[16]byte]struct{}, len(users)),
 		activeIDs:   make(map[[16]byte]int),
 		// 启动时检测一次；网卡地址变化后需要重启进程。
-		egress: newEgressSelector(detectEgressIPs()),
+		egress:  newEgressSelector(detectEgressIPs()),
+		traffic: newTrafficCounter(),
 		upgrader: websocket.Upgrader{
 			CheckOrigin:     func(*http.Request) bool { return true },
 			ReadBufferSize:  4096,

@@ -79,6 +79,8 @@ func main() {
 		_ = httpServer.Shutdown(shutdownCtx)
 		// Shutdown 不跟踪 hijack 后的 WebSocket, 再给转发会话一段排空时间.
 		srv.WaitDrain(5 * time.Second)
+		// 尽量把最后一个 30 分钟窗口内的流量发出去。
+		app.FlushTraffic(nodeCfg, srv)
 	}()
 
 	log.Printf(

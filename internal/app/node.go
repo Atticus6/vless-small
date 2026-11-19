@@ -250,6 +250,9 @@ func StartNodeSync(
 		cfg, srv, listen, path, static, info,
 		tunnelCtl, certCtl,
 	)
+	// 流量按设备 UUID 累计，每 30 分钟单独上报；自动休眠运行时没有常驻
+	// 进程，无法可靠累计，跳过。
+	go trafficLoop(cfg, srv)
 }
 
 func syncLoop(

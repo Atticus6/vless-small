@@ -217,7 +217,9 @@ func TestParseRequest(t *testing.T) {
 func TestTCPRelay(t *testing.T) {
 	id := mustTestUUID(t)
 	echo := startTCPEcho(t)
-	ts := newTestWSServer(t, map[[16]byte]struct{}{id: {}}, "")
+	srv := NewServer(map[[16]byte]struct{}{id: {}}, "")
+	ts := httptest.NewServer(http.HandlerFunc(srv.handleWS))
+	t.Cleanup(ts.Close)
 	ws := dialTestWS(t, ts)
 
 	req := buildRequest(t, id, cmdTCP, echo, []byte("ping"))
@@ -245,6 +247,15 @@ func TestTCPRelay(t *testing.T) {
 	got = readWSBytes(t, ws, len("hello"))
 	if string(got) != "hello" {
 		t.Fatalf("echoed data = %q", got)
+	}
+
+	traffic := srv.takeTraffic()
+	delta := traffic[id]
+	if delta.Up != uint64(len("ping")+len("hello")) {
+		t.Fatalf("upload bytes = %d, want %d", delta.Up, len("ping")+len("hello"))
+	}
+	if delta.Down != uint64(len("ping")+len("hello")) {
+		t.Fatalf("download bytes = %d, want %d", delta.Down, len("ping")+len("hello"))
 	}
 }
 
@@ -276,7 +287,9 @@ func TestTCPRelayChunked(t *testing.T) {
 func TestUDPRelay(t *testing.T) {
 	id := mustTestUUID(t)
 	echo := startUDPEcho(t)
-	ts := newTestWSServer(t, map[[16]byte]struct{}{id: {}}, "")
+	srv := NewServer(map[[16]byte]struct{}{id: {}}, "")
+	ts := httptest.NewServer(http.HandlerFunc(srv.handleWS))
+	t.Cleanup(ts.Close)
 	ws := dialTestWS(t, ts)
 
 	body := []byte("dns")
@@ -306,6 +319,12 @@ func TestUDPRelay(t *testing.T) {
 	n := int(binary.BigEndian.Uint16(resp[:2]))
 	if n != len(body) || !bytes.Equal(resp[2:2+n], body) {
 		t.Fatalf("udp response = %q", resp)
+	}
+
+	traffic := srv.takeTraffic()
+	delta := traffic[id]
+	if delta.Up != uint64(len(body)) || delta.Down != uint64(len(body)) {
+		t.Fatalf("udp traffic = %+v, want %d/%d", delta, len(body), len(body))
 	}
 }
 
@@ -408,8 +427,12 @@ func TestUDPFramerExtendsIdleDeadline(t *testing.T) {
 
 	pkt := binary.BigEndian.AppendUint16(nil, 3)
 	pkt = append(pkt, "abc"...)
-	if err := f.feed(conn, pkt); err != nil {
+	written, err := f.feed(conn, pkt)
+	if err != nil {
 		t.Fatalf("feed: %v", err)
+	}
+	if written != 3 {
+		t.Fatalf("written = %d, want 3", written)
 	}
 	if !conn.readDeadline.After(time.Now()) {
 		t.Fatalf("read deadline not extended: %v", conn.readDeadline)
