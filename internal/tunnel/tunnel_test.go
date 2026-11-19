@@ -33,6 +33,36 @@ func TestLocalTunnelPortRejectsInvalid(t *testing.T) {
 	}
 }
 
+func TestLocalTunnelHost(t *testing.T) {
+	tests := []struct {
+		listen string
+		want   string
+	}{
+		// 通配地址回源到回环：服务在回环上也能收到。
+		{listen: ":8080", want: "127.0.0.1"},
+		{listen: "0.0.0.0:9000", want: "127.0.0.1"},
+		{listen: "[::]:8080", want: "127.0.0.1"},
+		// 显式绑定时必须回源到同一地址，否则隧道连不上服务。
+		{listen: "127.0.0.1:8081", want: "127.0.0.1"},
+		{listen: "192.168.1.10:8080", want: "192.168.1.10"},
+		{listen: "localhost:8082", want: "localhost"},
+		// IPv6 字面量必须带方括号，否则拼进 URL 会解析失败。
+		{listen: "[::1]:8080", want: "[::1]"},
+		{listen: "[fd7a:115c:a1e0::1]:8080", want: "[fd7a:115c:a1e0::1]"},
+	}
+
+	for _, tt := range tests {
+		if got := localTunnelHost(tt.listen); got != tt.want {
+			t.Fatalf("localTunnelHost(%q) = %q, want %q", tt.listen, got, tt.want)
+		}
+	}
+
+	// 非法地址退化为回环，保持可用而不是拒绝。
+	if got := localTunnelHost("nonsense"); got != "127.0.0.1" {
+		t.Fatalf("localTunnelHost(nonsense) = %q, want 127.0.0.1", got)
+	}
+}
+
 func TestTunnelControllerDisabledNoop(t *testing.T) {
 	ctl := New(":8080")
 	defer ctl.Close()

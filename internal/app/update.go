@@ -117,7 +117,10 @@ func parseVersionParts(value string) []int {
 //
 // 成功替换后直接 os.Exit(0)：systemd（Restart=always）和 Docker
 // （--restart=always）都会拉起新版本；手动运行时需要自行重启。
-func handleNodeUpdate(cfg NodeConfig, update *nodeUpdate) {
+//
+// os.Exit 不会执行 defer，进程级的退出清理（main 里的 FlushTraffic）在这里
+// 也不会运行，所以替换前必须自己结算待上报流量，否则当前窗口的流量会丢。
+func handleNodeUpdate(cfg NodeConfig, srv *Server, update *nodeUpdate) {
 	if update == nil {
 		return
 	}
@@ -132,10 +135,29 @@ func handleNodeUpdate(cfg NodeConfig, update *nodeUpdate) {
 		return
 	}
 
+	// 先结算流量：下载可能耗时数十秒，期间还会继续产生新流量，所以下载完成
+	// 后再刷新一次，把这段窗口内的增量也发出去。
+	if srv != nil {
+		FlushTraffic(cfg, srv)
+	}
+
 	log.Printf("updating %s -> %s", Version, update.Version)
 	if err := installUpdate(cfg, *update, exePath); err != nil {
 		log.Printf("update %s failed: %v", update.Version, err)
 		return
+	}
+
+	// 下载期间的流量也要结算。上报失败时不重启：os.Exit 会丢掉这部分流量，
+	// 而下一轮上报还会带着同一条更新指令重试，代价只是晚一轮更新。
+	if srv != nil {
+		if err := FlushTrafficErr(cfg, srv); err != nil {
+			log.Printf(
+				"update %s deferred: final traffic report failed: %v",
+				update.Version,
+				err,
+			)
+			return
+		}
 	}
 
 	log.Printf("update %s installed, restarting", update.Version)

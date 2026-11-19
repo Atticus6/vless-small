@@ -140,6 +140,12 @@ func reportTrafficNow(
 	srv *Server,
 	force bool,
 ) (bool, error) {
+	// 串行化上报：退出刷新与定时循环可能同时触发。并发时定时循环可能已经
+	// take 走计数并在等 HTTP，退出刷新看到空计数就返回，那一批流量会随进程
+	// 退出而丢失。
+	srv.trafficReportMu.Lock()
+	defer srv.trafficReportMu.Unlock()
+
 	deltas := srv.takeTraffic()
 	if len(deltas) == 0 {
 		return false, nil
@@ -267,12 +273,19 @@ func trafficLoop(cfg NodeConfig, srv *Server) {
 // 手动停止、systemd 重启和 Docker stop 会走这里；自更新直接 os.Exit，
 // 来不及刷新的部分会丢失。
 func FlushTraffic(cfg NodeConfig, srv *Server) {
-	if cfg.BaseURL == "" {
-		return
-	}
-	if err := reportTraffic(cfg, srv); err != nil {
+	if err := FlushTrafficErr(cfg, srv); err != nil {
 		log.Printf("final traffic report failed: %v", err)
 	}
+}
+
+// FlushTrafficErr 与 FlushTraffic 相同，但把失败返回给调用方。
+//
+// 自更新需要据此决定是否退出：上报失败时直接 os.Exit 会丢掉这部分流量。
+func FlushTrafficErr(cfg NodeConfig, srv *Server) error {
+	if cfg.BaseURL == "" {
+		return nil
+	}
+	return reportTraffic(cfg, srv)
 }
 
 // addTraffic 记录一条已转发连接的字节数。

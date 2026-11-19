@@ -239,7 +239,7 @@ func StartNodeSync(
 		if result.Egress != nil {
 			srv.SetEgressEnabled(result.Egress.Enabled)
 		}
-		handleNodeUpdate(cfg, result.Update)
+		handleNodeUpdate(cfg, srv, result.Update)
 	}
 
 	if isAutoSleepRuntime(info.runtime) {
@@ -289,7 +289,7 @@ func syncLoop(
 		if result.Egress != nil {
 			srv.SetEgressEnabled(result.Egress.Enabled)
 		}
-		handleNodeUpdate(cfg, result.Update)
+		handleNodeUpdate(cfg, srv, result.Update)
 	}
 }
 
@@ -358,6 +358,13 @@ func syncDevices(
 	var result nodeReportResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
+	}
+
+	// 响应里缺少 devices（null）说明主控异常或版本不匹配，不能当成“没有
+	// 设备”处理：那样会把全部动态 UUID 清掉，而自动休眠运行时没有后台
+	// 轮询来恢复。显式的空数组才是合法的清空指令。
+	if result.Devices == nil {
+		return nil, fmt.Errorf("report response has no devices array")
 	}
 
 	users := make(map[[16]byte]struct{}, len(static)+len(result.Devices))

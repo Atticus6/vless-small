@@ -40,6 +40,8 @@ type certManager struct {
 	cancel     context.CancelFunc
 	generation int
 	reporter   func(Report)
+	// lastNotified 记录上一次回调的状态，用于抑制重复通知。
+	lastNotified Report
 }
 
 func New(handler http.Handler) Controller {
@@ -101,11 +103,16 @@ func (c *certManager) notify() {
 		Issuer:    c.issuer,
 		Error:     c.lastErr,
 	}
+	// 状态没变就不回调：端口被占用时 Sync 每 60 秒重试一次，每次都发一遍
+	// 相同的失败状态会持续刷主控日志和 D1 写入，却没有任何新信息。
+	if reporter == nil || status == c.lastNotified {
+		c.mu.Unlock()
+		return
+	}
+	c.lastNotified = status
 	c.mu.Unlock()
 
-	if reporter != nil {
-		reporter(status)
-	}
+	reporter(status)
 }
 
 func (c *certManager) Status() Report {

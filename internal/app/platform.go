@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -198,6 +199,13 @@ func parseLoc(raw string) (float64, float64, bool) {
 	}
 	lon, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
 	if err != nil {
+		return 0, 0, false
+	}
+	// NaN 能通过 ParseFloat，且与任何数字比较都为 false，范围检查拦不住它。
+	// 一旦写进 info 会导致后续 json.Marshal 失败，节点再也发不出上报，
+	// 而 syncLoop 复用启动时的 info，重启前都无法恢复。这里按缺失处理。
+	if math.IsNaN(lat) || math.IsNaN(lon) ||
+		math.IsInf(lat, 0) || math.IsInf(lon, 0) {
 		return 0, 0, false
 	}
 	if lat < -90 || lat > 90 || lon < -180 || lon > 180 {

@@ -227,7 +227,25 @@ jobs:
           set -euo pipefail
 
           if gh release view "$VERSION" >/dev/null 2>&1; then
-            # 同一版本已存在（例如手动重跑）：覆盖资产即可。
+            # 版本已存在时只允许“同一提交的重跑”覆盖资产。两个分支各自递增
+            # version.txt 会算出同一个版本号；若不校验，后一次发布会用另一个
+            # 提交的二进制覆盖 tag 指向的产物，安装包与源码就对不上了。
+            #
+            # 必须比较 tag 实际指向的 commit，不能接受“同名分支”：不同分支
+            # 可能指向不同提交，用分支名兜底等于放行覆盖。查询失败也要中止，
+            # 否则空值会让校验直接跳过。
+            existing="$(gh release view "$VERSION" --json targetCommitish \
+              --jq '.targetCommitish')"
+            if [ -z "$existing" ]; then
+              echo "无法确定 ${VERSION} 已发布在哪个提交上，拒绝覆盖。" >&2
+              exit 1
+            fi
+            existing_sha="$(git rev-parse "${existing}^{commit}" 2>/dev/null || true)"
+            if [ "$existing_sha" != "$SHA" ]; then
+              echo "版本 ${VERSION} 已由提交 ${existing} (${existing_sha:-未知}) 发布，" >&2
+              echo "本次构建是 ${SHA}；拒绝覆盖同名版本，请先提升 version.txt。" >&2
+              exit 1
+            fi
             gh release upload "$VERSION" dist/* --clobber
           else
             # 首次发布：用本次构建的提交创建 tag，并生成更新说明。

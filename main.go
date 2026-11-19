@@ -73,6 +73,11 @@ func main() {
 	go func() {
 		defer close(shutdownDone)
 		<-ctx.Done()
+		// 先关证书的 80/443 监听：它由 certCtl 独立持有，httpServer.Shutdown
+		// 管不到。不先关的话，排空期间仍能建立新的 HTTPS WebSocket 会话，
+		// 退出前永远等不到 active 归零。
+		certCtl.Close()
+
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = httpServer.Shutdown(shutdownCtx)

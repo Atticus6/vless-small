@@ -173,7 +173,7 @@ func Supported() bool { return true }
 func New(listen string) Controller {
 	port, err := localTunnelPort(listen)
 	return &controller{
-		port:    port,
+		origin:  fmt.Sprintf("%s:%d", localTunnelHost(listen), port),
 		portErr: err,
 	}
 }
@@ -181,7 +181,8 @@ func New(listen string) Controller {
 type controller struct {
 	mu sync.Mutex
 
-	port    int
+	// origin 是 cloudflared 的回源地址（host:port），按实际监听地址生成。
+	origin  string
 	portErr error
 
 	enabled bool
@@ -260,7 +261,7 @@ func (t *controller) startLocked() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	protocol := tunnelProtocol()
-	port := t.port
+	origin := t.origin
 	t.cancel = cancel
 	t.url = ""
 	t.lastErr = ""
@@ -283,22 +284,43 @@ func (t *controller) startLocked() {
 			cancel()
 			return
 		}
-		t.url = quick.URL
 		t.lastErr = ""
 		t.mu.Unlock()
 
 		log.Printf("tunnel: quick %s", quick.URL)
 		if err := startTunnel(
 			ctx,
-			port,
+			origin,
 			quick.Credentials,
 			quick.URL,
 			protocol,
+			// 只有首条边缘连接注册成功后才发布 URL：申请接口返回的地址在
+			// 隧道真正连上之前不可用，提前上报会让订阅里出现打不开的入口。
+			func() { t.publishURL(generation, quick.URL) },
 			func(err error) { t.supervisorExited(generation, err) },
 		); err != nil {
 			t.quickStartFailed(generation, err)
 		}
 	}()
+}
+
+// publishURL 在隧道连上边缘后写入地址。
+//
+// 等待期间可能已经关闭或换代，必须重新校验 generation；过期结果直接丢弃，
+// 否则旧隧道的地址会覆盖新一轮的状态。
+//
+// t.cancel == nil 表示 supervisor 已经退出（supervisorExited 会清空它），
+// 此时再发布地址会让主控拿到一个已经断开的隧道入口。
+func (t *controller) publishURL(generation int, url string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.closed || t.generation != generation || t.cancel == nil || t.url != "" {
+		return
+	}
+	t.url = url
+	t.lastErr = ""
+	log.Printf("tunnel: connected %s", url)
 }
 
 // quickStartFailed 处理临时隧道申请或启动失败。
@@ -369,10 +391,11 @@ func (t *controller) supervisorExited(generation int, err error) {
 // 停止），由调用方按 generation 判断是否需要清理状态。
 func startTunnel(
 	ctx context.Context,
-	port int,
+	origin string,
 	credentials connection.Credentials,
 	quickURL string,
 	protocol string,
+	onConnected func(),
 	onExit func(error),
 ) error {
 	switch protocol {
@@ -417,7 +440,7 @@ func startTunnel(
 	// 临时隧道域名随机，无法预配置 Hostname；单条无 Hostname 规则
 	// 即匹配所有 Host。后面不能再跟规则，否则 cloudflared 会拒绝。
 	rules := []cfconfig.UnvalidatedIngressRule{
-		{Service: fmt.Sprintf("http://localhost:%d", port)},
+		{Service: "http://" + origin},
 	}
 
 	ing, err := ingress.ParseIngress(&cfconfig.Configuration{Ingress: rules})
@@ -487,6 +510,18 @@ func startTunnel(
 	// 主动停止通过 ctx 取消；graceShutdownC 只保留给 cloudflared 内部
 	// 优雅退出信号，本进程不会主动 close。
 	shutdown := make(chan struct{})
+
+	// cloudflared 在首条边缘连接注册后才 Notify(connectedSignal)。等它触发
+	// 再发布地址，避免把还不能用的 quick tunnel 域名上报给主控。
+	if onConnected != nil {
+		go func() {
+			select {
+			case <-connectedSignal.Wait():
+				onConnected()
+			case <-ctx.Done():
+			}
+		}()
+	}
 
 	go func() {
 		err := supervisor.StartTunnelDaemon(

@@ -55,6 +55,78 @@ func TestDevicePush(t *testing.T) {
 	}
 }
 
+func TestDevicePushRejectsMissingDevices(t *testing.T) {
+	staticID := mustTestUUID(t)
+	dynamicID, err := parseUUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, payload := range map[string]string{
+		"empty object": `{}`,
+		"null body":    `null`,
+		"null devices": `{"devices":null}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := NewServer(map[[16]byte]struct{}{staticID: {}}, "/ws")
+			srv.controlToken = "secret"
+
+			// 先放一个动态用户，验证被拒绝的请求不会把它清掉。
+			srv.setUsers(map[[16]byte]struct{}{staticID: {}, dynamicID: {}})
+
+			req := httptest.NewRequest(
+				http.MethodPost,
+				"http://example.com/ws",
+				bytes.NewReader([]byte(payload)),
+			)
+			req.Header.Set("Authorization", "Bearer secret")
+			rec := httptest.NewRecorder()
+
+			srv.HandleHTTP(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", rec.Code)
+			}
+			if !srv.hasUser(dynamicID) {
+				t.Fatal("rejected push must not drop existing users")
+			}
+		})
+	}
+}
+
+func TestDevicePushAcceptsEmptyArray(t *testing.T) {
+	staticID := mustTestUUID(t)
+	dynamicID, err := parseUUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := NewServer(map[[16]byte]struct{}{staticID: {}}, "/ws")
+	srv.controlToken = "secret"
+	srv.setUsers(map[[16]byte]struct{}{staticID: {}, dynamicID: {}})
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"http://example.com/ws",
+		bytes.NewReader([]byte(`{"devices":[]}`)),
+	)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	srv.HandleHTTP(rec, req)
+
+	// 显式空数组是合法的“清空动态用户”操作，静态用户保留。
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if srv.hasUser(dynamicID) {
+		t.Fatal("explicit empty array should clear dynamic users")
+	}
+	if !srv.hasUser(staticID) {
+		t.Fatal("static user must survive an empty push")
+	}
+}
+
 func TestDevicePushRejectsWrongToken(t *testing.T) {
 	srv := NewServer(nil, "/ws")
 	srv.controlToken = "secret"

@@ -37,8 +37,7 @@ type Controller interface {
 
 // localTunnelPort 从监听地址中提取本地端口，供本地回源地址使用.
 //
-// ":8080"、"0.0.0.0:8080" 和 "[::]:8080" 都会得到 8080；cloudflared 固定
-// 回源到 127.0.0.1，因此只需要端口。
+// ":8080"、"0.0.0.0:8080" 和 "[::]:8080" 都会得到 8080。
 func localTunnelPort(listen string) (int, error) {
 	_, port, err := net.SplitHostPort(strings.TrimSpace(listen))
 	if err != nil {
@@ -50,4 +49,29 @@ func localTunnelPort(listen string) (int, error) {
 		return 0, fmt.Errorf("listen %q has invalid port", listen)
 	}
 	return value, nil
+}
+
+// localTunnelHost 从监听地址中提取 cloudflared 的回源主机.
+//
+// 通配地址（空、0.0.0.0、::）回源到 127.0.0.1；显式绑定某个地址时（例如
+// 192.168.1.10:8080）必须回源到该地址——服务没有监听回环，固定用
+// localhost 会让隧道的所有请求都连不上。
+//
+// 返回值已按 URL 要求处理 IPv6：`[::1]:8080` 得到 `[::1]`，拼进
+// `http://host:port` 才不会解析失败。
+func localTunnelHost(listen string) string {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(listen))
+	if err != nil {
+		return "127.0.0.1"
+	}
+	host = strings.TrimSpace(host)
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		return "127.0.0.1"
+	}
+	// SplitHostPort 已经去掉方括号；IPv6 字面量必须重新加上。
+	if strings.Contains(host, ":") {
+		return "[" + host + "]"
+	}
+	return host
 }

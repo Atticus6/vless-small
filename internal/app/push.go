@@ -43,6 +43,14 @@ func (s *Server) handleDevicePush(w http.ResponseWriter, r *http.Request) bool {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return true
 	}
+	// `{}`、`null` 和 `{"devices":null}` 都能解码成功但 Devices 为 nil；
+	// 直接替换认证用户会清空全部动态 UUID，要等下一次有效同步才恢复
+	// （自动休眠运行时没有后台轮询，可能一直不恢复）。只有显式的空数组
+	// `{"devices":[]}` 才算合法的“清空”操作。
+	if body.Devices == nil {
+		http.Error(w, "devices array is required", http.StatusBadRequest)
+		return true
+	}
 
 	users := make(map[[16]byte]struct{}, len(s.staticUsers)+len(body.Devices))
 	for id := range s.staticUsers {

@@ -60,6 +60,14 @@ type Server struct {
 
 	// traffic 按设备 UUID 累计待上报的上下行字节。
 	traffic *trafficCounter
+
+	// trafficReportMu 串行化上报流程（定时循环 / 退出刷新 / 自更新）。
+	//
+	// 没有它时，退出刷新可能与在途的定时上报并发：定时上报已经 take 走
+	// 计数并在等 HTTP，退出刷新看到空计数就返回，进程随后退出，那一批流量
+	// 就丢了。持锁期间定时循环会等退出刷新结束，退出刷新也能看到前一轮
+	// 失败后回滚的增量。
+	trafficReportMu sync.Mutex
 }
 
 // healthResponse 是 /healthz 的响应，只保留探活必需的信息。
