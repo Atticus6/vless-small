@@ -189,7 +189,9 @@ type controller struct {
 	closed  bool
 	cancel  context.CancelFunc
 	url     string
-	lastErr string
+	// edgeLocation 是 cloudflared 注册成功后边缘返回的 colo 代码（如 hkg）。
+	edgeLocation string
+	lastErr      string
 	// generation 每次启动/停止都会递增，用于丢弃上一代 supervisor 的退出事件。
 	generation int
 }
@@ -228,9 +230,10 @@ func (t *controller) Status() Report {
 	defer t.mu.Unlock()
 
 	return Report{
-		Supported: true,
-		URL:       t.url,
-		Error:     t.lastErr,
+		Supported:    true,
+		URL:          t.url,
+		EdgeLocation: t.edgeLocation,
+		Error:        t.lastErr,
 	}
 }
 
@@ -264,6 +267,7 @@ func (t *controller) startLocked() {
 	origin := t.origin
 	t.cancel = cancel
 	t.url = ""
+	t.edgeLocation = ""
 	t.lastErr = ""
 	log.Printf(
 		"tunnel: starting quick tunnel protocol=%s log_level=%s",
@@ -297,11 +301,35 @@ func (t *controller) startLocked() {
 			// 只有首条边缘连接注册成功后才发布 URL：申请接口返回的地址在
 			// 隧道真正连上之前不可用，提前上报会让订阅里出现打不开的入口。
 			func() { t.publishURL(generation, quick.URL) },
+			// 边缘注册成功时 cloudflared 会给出 colo 代码，记录下来供主控展示。
+			func(location string) { t.recordEdgeLocation(generation, location) },
 			func(err error) { t.supervisorExited(generation, err) },
 		); err != nil {
 			t.quickStartFailed(generation, err)
 		}
 	}()
+}
+
+// recordEdgeLocation 记录隧道实际接入的 Cloudflare 数据中心。
+//
+// generation/cancel 校验与 publishURL 一致：过期隧道或已退出的 supervisor
+// 不能再写入位置，否则会显示出与当前地址不匹配的 colo。
+func (t *controller) recordEdgeLocation(generation int, location string) {
+	if location == "" {
+		return
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.closed || t.generation != generation || t.cancel == nil {
+		return
+	}
+	if t.edgeLocation == location {
+		return
+	}
+	t.edgeLocation = location
+	log.Printf("tunnel: edge location %s", location)
 }
 
 // publishURL 在隧道连上边缘后写入地址。
@@ -338,6 +366,7 @@ func (t *controller) quickStartFailed(generation int, err error) {
 	cancel := t.cancel
 	t.cancel = nil
 	t.url = ""
+	t.edgeLocation = ""
 	t.lastErr = message
 	t.mu.Unlock()
 
@@ -355,6 +384,7 @@ func (t *controller) stopLocked() {
 		t.cancel = nil
 	}
 	t.url = ""
+	t.edgeLocation = ""
 }
 
 // supervisorExited 在 cloudflared supervisor 意外退出后清理隧道状态。
@@ -375,6 +405,7 @@ func (t *controller) supervisorExited(generation int, err error) {
 	cancel := t.cancel
 	t.cancel = nil
 	t.url = ""
+	t.edgeLocation = ""
 	t.lastErr = message
 	t.mu.Unlock()
 
@@ -396,6 +427,7 @@ func startTunnel(
 	quickURL string,
 	protocol string,
 	onConnected func(),
+	onEdgeLocation func(string),
 	onExit func(error),
 ) error {
 	switch protocol {
@@ -415,6 +447,15 @@ func startTunnel(
 		logger.CreateConfig(tunnelLogLevel(), false, false, "", ""),
 	)
 	observer := connection.NewObserver(logTransport)
+
+	// 边缘注册成功的事件里带着 colo 代码。注册一个 sink 取出来，供上报使用。
+	if onEdgeLocation != nil {
+		observer.RegisterSink(connection.EventSinkFunc(func(event connection.Event) {
+			if event.EventType == connection.Connected && event.Location != "" {
+				onEdgeLocation(event.Location)
+			}
+		}))
+	}
 
 	// 新版 cloudflared 把客户端信息收进 client.Config；FeatureSelector 决定
 	// 连接器启用的边缘特性。
