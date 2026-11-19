@@ -230,7 +230,8 @@ docker run -d --restart=always --name vless-small \
 - UDP：按 datagram payload 统计，不含 2 字节长度前缀；
 - 多条并发连接按 UUID 原子累加。
 
-每 30 分钟向主控 `POST /api/nodes/traffic` 上报一次：
+每 5 分钟检查一次累计流量，达到阈值才向主控
+`POST /api/nodes/traffic` 上报：
 
 ```json
 {
@@ -241,12 +242,14 @@ docker run -d --restart=always --name vless-small \
 }
 ```
 
+- 本轮总流量低于 **4 KiB** 时暂缓，计数保留到下一轮；最多跳过 5 次
+  （30 分钟）后强制上报，避免微小流量永久不落库；
 - 每批最多 200 个设备，避免 Worker 聚合后的用户数据点超过 Analytics Engine
   单次 250 点限制；
 - 上报成功才清空累计值；某一批失败时回滚该批及后续批次，下一轮重试；
 - 进程收到 SIGTERM 时会尽量 `FlushTraffic` 一次；自更新直接退出，最多丢失
-  当前 30 分钟窗口；
-- Vercel/Railway 等自动休眠运行时没有常驻进程，不启动 30 分钟上报循环。
+  当前未上报窗口；
+- Vercel/Railway 等自动休眠运行时没有常驻进程，不启动流量上报循环。
 
 主控不查询设备归属，直接把每条记录写入 Analytics Engine：`blob1` 是设备
 UUID，`blob2` 是节点 id，`double1/2` 是上传/下载字节，时间由 Analytics

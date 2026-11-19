@@ -28,8 +28,12 @@ const (
 	// 从主控拉取设备的间隔.
 	nodeSyncInterval = 60 * time.Second
 
-	// 按设备统计的流量每 30 分钟上报一次；单批最多 200 个设备，
+	// 按设备统计的流量每 5 分钟检查一次；单批最多 200 个设备，
 	// 保证 Worker 聚合后的用户数据点不超过 Analytics Engine 单次 250 点限制.
-	trafficReportInterval  = 30 * time.Minute
-	trafficReportBatchSize = 200
+	// 本轮总量低于 4 KiB 时暂缓，继续累计；最多跳过 5 次（30 分钟）后强制上报，
+	// 避免微小流量永久不落库.
+	trafficReportInterval   = 5 * time.Minute
+	trafficReportBatchSize  = 200
+	trafficReportMinBytes   = 4 << 10
+	trafficForceReportAfter = 5
 )

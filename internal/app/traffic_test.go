@@ -105,6 +105,60 @@ func TestReportTrafficRestoresOnFailure(t *testing.T) {
 	}
 }
 
+func TestReportTrafficSkipsSmallAndForces(t *testing.T) {
+	requests := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	id, err := parseUUID("14725836-1234-5678-9abc-def012345678")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := NewServer(nil, "")
+	cfg := NodeConfig{BaseURL: ts.URL, Name: "hk", Token: "secret"}
+
+	// 低于 4 KiB：暂缓，计数保留。
+	srv.addTraffic(id, 100, 100)
+	sent, err := reportTrafficNow(cfg, srv, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent || requests != 0 {
+		t.Fatalf("small traffic sent=%v requests=%d", sent, requests)
+	}
+	if delta := srv.takeTraffic()[id]; delta.Up != 100 || delta.Down != 100 {
+		t.Fatalf("small traffic not retained: %+v", delta)
+	}
+
+	// 继续累计但仍低于阈值：再暂缓一次。
+	srv.addTraffic(id, 1000, 1000)
+	if sent, err := reportTrafficNow(cfg, srv, false); err != nil || sent {
+		t.Fatalf("below threshold sent=%v err=%v", sent, err)
+	}
+	srv.addTraffic(id, 1500, 1500)
+	sent, err = reportTrafficNow(cfg, srv, false)
+	if err != nil || !sent {
+		t.Fatalf("above threshold sent=%v err=%v", sent, err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+
+	// 强制模式即使很小也发送（退出刷新 / 累计 30 分钟）。
+	srv.addTraffic(id, 10, 10)
+	sent, err = reportTrafficNow(cfg, srv, true)
+	if err != nil || !sent {
+		t.Fatalf("forced sent=%v err=%v", sent, err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+}
+
 func TestReportTrafficChunks(t *testing.T) {
 	requests := 0
 	entries := 0

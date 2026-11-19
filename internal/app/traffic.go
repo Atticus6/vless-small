@@ -124,34 +124,54 @@ type nodeTrafficReport struct {
 	Traffic []nodeTrafficEntry `json:"traffic"`
 }
 
-// reportTraffic 把当前累计流量上报给主控。
-//
-// 按设备分批发送，每批最多 trafficReportBatchSize 条：Worker 会把同一用户
-// 的多个设备聚合后写入 Analytics Engine，而单次 Worker 调用最多写 250 个
-// 数据点，200 条设备可以保证聚合后的用户数不会超限。某一批失败时只回滚
-// 该批及后续批次，已经成功的批次不会重复计数。
+// reportTraffic 强制上报当前累计流量（用于退出前刷新和测试）。
 func reportTraffic(cfg NodeConfig, srv *Server) error {
+	_, err := reportTrafficNow(cfg, srv, true)
+	return err
+}
+
+// reportTrafficNow 把当前累计流量上报给主控。
+//
+// force=false 时，本轮总量低于 trafficReportMinBytes 会回滚计数并暂缓上报，
+// 等下一轮继续累计；force=true 时无论大小都发送（退出刷新或已累计 30 分钟）。
+// 返回值 sent 表示是否真正发出了请求。
+func reportTrafficNow(
+	cfg NodeConfig,
+	srv *Server,
+	force bool,
+) (bool, error) {
 	deltas := srv.takeTraffic()
 	if len(deltas) == 0 {
-		return nil
+		return false, nil
 	}
 
 	entries := make([]nodeTrafficEntry, 0, len(deltas))
+	var total uint64
 	for id, delta := range deltas {
 		if delta.Up == 0 && delta.Down == 0 {
 			continue
 		}
+		up := min(delta.Up, maxTrafficBytes)
+		down := min(delta.Down, maxTrafficBytes)
+		total += up + down
 		entries = append(entries, nodeTrafficEntry{
 			ID:   formatUUID(id),
-			Up:   min(delta.Up, maxTrafficBytes),
-			Down: min(delta.Down, maxTrafficBytes),
+			Up:   up,
+			Down: down,
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].ID < entries[j].ID
 	})
 	if len(entries) == 0 {
-		return nil
+		return false, nil
+	}
+
+	// 没有流量或流量很小：保留累计值，下一轮继续累计；最多跳过
+	// trafficForceReportAfter 次后由 trafficLoop 强制发送。
+	if !force && total < trafficReportMinBytes {
+		srv.restoreTraffic(deltas)
+		return false, nil
 	}
 
 	for start := 0; start < len(entries); start += trafficReportBatchSize {
@@ -162,12 +182,12 @@ func reportTraffic(cfg NodeConfig, srv *Server) error {
 		if err := postTrafficReport(cfg, entries[start:end]); err != nil {
 			// 失败批次和尚未发送的批次都回滚；成功批次已经计入 AE。
 			srv.restoreTraffic(entriesToDeltas(entries[start:]))
-			return err
+			return false, err
 		}
 	}
 
-	log.Printf("reported traffic for %d devices", len(entries))
-	return nil
+	log.Printf("reported traffic for %d devices (%d bytes)", len(entries), total)
+	return true, nil
 }
 
 // postTrafficReport 发送一批设备流量。
@@ -221,14 +241,23 @@ func entriesToDeltas(entries []nodeTrafficEntry) map[[16]byte]trafficDelta {
 	return result
 }
 
-// trafficLoop 每 30 分钟上报一次累计流量。
+// trafficLoop 每 5 分钟检查一次流量；小流量暂缓，最多累计到 30 分钟强制上报。
 func trafficLoop(cfg NodeConfig, srv *Server) {
 	ticker := time.NewTicker(trafficReportInterval)
 	defer ticker.Stop()
 
+	skipped := 0
 	for range ticker.C {
-		if err := reportTraffic(cfg, srv); err != nil {
+		force := skipped >= trafficForceReportAfter
+		sent, err := reportTrafficNow(cfg, srv, force)
+		if err != nil {
 			log.Printf("traffic report failed: %v", err)
+			continue
+		}
+		if sent {
+			skipped = 0
+		} else {
+			skipped++
 		}
 	}
 }
