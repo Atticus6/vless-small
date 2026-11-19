@@ -97,7 +97,7 @@ type configResponse struct {
 	Disk              *diskHealth  `json:"disk,omitempty"`
 	// System 是宿主机/操作系统的 CPU、内存和磁盘占用（仅 Linux）。
 	System *systemHealth `json:"system,omitempty"`
-	// Tunnel / Cert 是内置 Quick Tunnel 与自动证书的实时状态。
+	// Tunnel / Cert 是内置隧道（固定或临时）与自动证书的实时状态。
 	Tunnel tunnel.Report `json:"tunnel"`
 	Cert   cert.Report   `json:"cert"`
 	// Egress 是本地出口 IPv4 列表，第一项为默认出口；仅 runtime=local 时存在。

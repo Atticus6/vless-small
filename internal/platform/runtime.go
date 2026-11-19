@@ -16,7 +16,8 @@ import (
 // 无法匹配任何平台时返回 "local"。
 func DetectRuntime() string {
 	if v := firstNonEmpty(os.Getenv("NODE_RUNTIME"), os.Getenv("RUNTIME")); v != "" {
-		return v
+		// 覆盖值也统一小写，避免 RUNTIME=LOCAL/Vercel 让后续精确匹配失效。
+		return strings.ToLower(v)
 	}
 
 	switch {

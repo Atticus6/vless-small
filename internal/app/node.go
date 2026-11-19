@@ -68,7 +68,8 @@ type nodeReportResponse struct {
 	Devices []nodeDevice `json:"devices"`
 	// Update 只在主控为该节点设置了目标版本、且节点版本落后时出现。
 	Update *nodeUpdate `json:"update,omitempty"`
-	// Tunnel 是主控下发的 Quick Tunnel 开关；nil 视为不改变。
+	// Tunnel 是主控下发的隧道开关与固定隧道配置；nil 视为不改变。
+	// Token/Hostname 为空且 Enabled=true 时节点使用临时隧道兜底。
 	Tunnel *tunnel.Signal `json:"tunnel,omitempty"`
 	// Cert 是主控下发的证书域名；nil 视为不改变，空字符串表示关闭。
 	Cert *cert.Signal `json:"cert,omitempty"`

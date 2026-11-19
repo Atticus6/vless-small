@@ -150,9 +150,13 @@ TUNNEL_INTEGRATION=1 \
 TUNNEL_TOKEN='<cloudflare tunnel token>' \
 TUNNEL_HOSTNAME='hk-tunnel.atticus.eu.org' \
 go test ./internal/tunnel -run TestFixedTunnelProvisioning -v -timeout 240s
+
+# 可选：真实临时隧道集成测试（申请 *.trycloudflare.com 并验证回源）
+TUNNEL_QUICK_INTEGRATION=1 \
+go test ./internal/tunnel -run TestQuickTunnelProvisioning -v -timeout 180s
 ```
 
-真实联调测试需要出站 UDP 7844（QUIC）或 TCP 7844（HTTP/2），并使用一个已存在的命名隧道 token/hostname。
+真实联调测试需要出站 UDP 7844（QUIC）或 TCP 7844（HTTP/2），并使用一个已存在的命名隧道 token/hostname；临时隧道测试在 UDP 受限环境可加 `TUNNEL_PROTOCOL=http2`。
 
 ## 自动更新（Web 下发）
 
@@ -262,18 +266,23 @@ Engine 自动记录。设备或节点已不存在时也照常写入。
 
 非 Vercel 构建直接内嵌**官方 cloudflared Go 实现**（`github.com/cloudflare/cloudflared`），
 调用其 `supervisor`、`connection`、`orchestration` 等包，把 cloudflared 编译进
-当前进程；节点上不需要安装 cloudflared 二进制。主控自动创建命名隧道并把
-token + hostname 下发给节点，节点用 token 连接 Cloudflare 边缘并转发
-HTTP/WebSocket。
+当前进程；节点上不需要安装 cloudflared 二进制。当前内嵌版本对应
+**2026.11.1**，连接器上报的 `tunnelBuildVersion` 与之一致；Cloudflare
+控制台按该版本判断支持状态，升级依赖时需同步修改这个常量。主控自动创建
+命名隧道并把 token + hostname 下发给节点，节点用 token 连接 Cloudflare
+边缘并转发 HTTP/WebSocket。
 
 运行时行为：
 
 - 主控的“VLESS 管理 → 固定隧道”按节点开关，默认开启；节点在每次上报
   （≤60 秒）时读取 `tunnel: { enabled, token, hostname }`，启动/停止隧道。
 - 固定地址形如 `https://hk-tunnel.atticus.eu.org`，由主控分配并写入 DNS
-  CNAME，**进程重启不会变化**；不再使用 `*.trycloudflare.com` 临时地址。
+  CNAME，**进程重启不会变化**。
+- 固定隧道默认开启但可能尚未分配：此时主控只下发 `enabled=true`，节点
+  自动申请 `*.trycloudflare.com` 临时隧道兜底，分配完成后下一次上报会
+  自动切换到固定域名。临时地址随进程重启变化。
 - 节点地址随 `/api/nodes/report` 上报，主控写入 `vless.tunnel_address`，
-  列表和指标弹框可直接看到。
+  列表和指标弹框可直接看到当前固定/临时地址。
 - 隧道固定回源到 `http://127.0.0.1:<PORT>`，只接受分配的 hostname，未知
   Host 返回 404。
 - 协议默认 `auto`，由 cloudflared 自动选择 QUIC 或 HTTP/2；可用
