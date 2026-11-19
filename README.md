@@ -76,9 +76,13 @@ NODE_NAME='hk-01'; NODE_TOKEN='<node token>'; \
 优先使用上面的主控代理。
 
 脚本按 `uname` 选择对应资产并校验 sha256，创建 `vless-small` 系统用户，把配置
-写入 `/etc/vless-small/vless-small.env`（0600），注册
-`/etc/systemd/system/vless-small.service`，最后用 `http://127.0.0.1:<PORT>/healthz`
-做启动检查。
+写入 `/etc/vless-small/vless-small.env`（0600），注册系统服务，最后用
+`http://127.0.0.1:<PORT>/healthz` 做启动检查。
+
+服务管理器自动检测：有 systemd 时写 `/etc/systemd/system/vless-small.service`；
+Alpine 等只有 OpenRC 的环境写 `/etc/init.d/vless-small` + `/etc/conf.d/vless-small`
+（`supervise-daemon` 负责崩溃重启）。两者都没有时只安装二进制。脚本本身兼容
+busybox ash，Alpine 上无需额外安装 bash。
 
 | 参数 | 说明 |
 | --- | --- |
@@ -90,8 +94,8 @@ NODE_NAME='hk-01'; NODE_TOKEN='<node token>'; \
 | `--version` | 指定 Release 版本，默认 latest；使用 `--download-base` 时必填 |
 | `--download-base` | Release 资产代理地址（Web 控制台生成）；设置后不需要 GitHub Token |
 | `--github-token` | 直连私有仓库时的 GitHub Token；Web 代理模式不需要 |
-| `--install-dir` | 二进制目录；root 默认 `/opt/vless-small`（服务用户可写，支持自更新），非 root 默认 `~/.local/bin`；root 安装会在 `/usr/local/bin` 建符号链接 |
-| `--service` / `--no-service` | 强制或禁止注册 systemd 服务 |
+| `--install-dir` | 二进制目录；root 默认 `/opt/vless-small`（服务用户可写，支持自更新），非 root 默认 `~/.local/bin`；root 安装会在 `/usr/local/bin` 建符号链接。注册服务时目录必须在 `/opt`、`/srv`、`/var/lib` 或 `/usr/local/lib` 下 |
+| `--service` / `--no-service` | 强制或禁止注册系统服务（systemd / OpenRC） |
 | `--uninstall` | 停止服务并删除配置与二进制 |
 
 ```bash
@@ -111,12 +115,39 @@ curl -fsSL https://github.com/Atticus6/vless-small/releases/latest/download/inst
   | sudo bash -s -- --uninstall
 ```
 
-服务管理：
+服务管理（systemd）：
 
 ```bash
 systemctl status vless-small
 journalctl -u vless-small -f
 vless-small -version   # 查看已安装版本
+```
+
+服务管理（Alpine / OpenRC）：
+
+```bash
+rc-service vless-small status
+rc-service vless-small restart
+tail -f /var/log/vless-small.log
+vless-small -version
+```
+
+Alpine 最小系统需要先补依赖（`tar`、`sha256sum` 已由 busybox 提供）：
+
+```bash
+apk add --no-cache curl ca-certificates
+```
+
+脚本兼容 busybox ash，Alpine 上不需要安装 bash，直接用 `sh` 执行即可：
+
+```bash
+# 安装（以 root 执行；--config 换成控制台生成的命令）
+curl -fsSL https://github.com/Atticus6/vless-small/releases/latest/download/install.sh \
+  | sudo sh -s -- --config "https://dsh.example.com_hk_<token>" --path /ws
+
+# 卸载
+curl -fsSL https://github.com/Atticus6/vless-small/releases/latest/download/uninstall.sh \
+  | sudo sh
 ```
 
 ## 卸载
@@ -132,8 +163,8 @@ curl -fsSL -H "Authorization: Bearer <node token>" \
   "https://dsh.example.com/api/releases/<version>/uninstall.sh" | sudo bash
 ```
 
-脚本会停止/禁用并删除 systemd 服务、`/etc/vless-small`、`/opt/vless-small`
-和 `/usr/local/bin/vless-small` 符号链接；`--docker` 额外删除名为
+脚本会停止/禁用并删除系统服务（systemd unit 或 OpenRC init 脚本 + conf.d）、
+`/etc/vless-small`、`/opt/vless-small` 和 `/usr/local/bin/vless-small` 符号链接；`--docker` 额外删除名为
 `vless-small` 的容器，`--keep-user` 保留服务用户，`--install-dir` 用于
 非默认目录。`install.sh --uninstall` 仍然可用。
 
@@ -161,12 +192,16 @@ go test ./internal/tunnel -run TestQuickTunnelProvisioning -v -timeout 180s
 1. 用自身 `name` + `token` 从主控 `/api/nodes/update` 下载原始二进制
    （Worker 用 `GITHUB_TOKEN` 访问私有 Release，节点不接触 GitHub 凭据）；
 2. 校验 sha256，在二进制同目录写临时文件并原子替换；
-3. 退出，由 systemd / Docker 按重启策略拉起新版本。
+3. 退出，由 systemd / OpenRC / Docker 按重启策略拉起新版本。
 
 **systemd**：新版安装脚本把二进制放到 `/opt/vless-small`（属主为服务用户），
 `/usr/local/bin/vless-small` 是指向它的符号链接，systemd unit 通过
 `ReadWritePaths=/opt/vless-small` 允许替换。已有旧节点需要**重跑一次**新版
 `install.sh` 完成迁移，否则二进制仍位于 `/usr/local/bin`，服务用户没有写权限。
+
+**OpenRC（Alpine）**：同样安装到 `/opt/vless-small` 并交给服务用户，
+`/etc/conf.d/vless-small` 里用 `supervisor="supervise-daemon"` 托管进程，
+崩溃后按 `respawn_delay` 重启；自更新替换二进制后服务会被 supervisor 重新拉起。
 
 **Docker**：
 
@@ -302,6 +337,10 @@ Engine 自动记录。设备或节点已不存在时也照常写入。
 Environment=GOMEMLIMIT=96MiB
 Environment=GOGC=50
 
+# OpenRC：写进 /etc/vless-small/vless-small.env
+GOMEMLIMIT=96MiB
+GOGC=50
+
 # Docker
 -e GOMEMLIMIT=96MiB -e GOGC=50
 ```
@@ -333,8 +372,9 @@ Environment=GOGC=50
   Railway、Render、Fly、Koyeb、Cloudflare、Zeabur 等托管容器/PaaS 运行时
   都不支持，会在上报中返回 `cert.supported=false`。
 - 域名必须解析到该节点，且公网能访问 80/443。
-- 安装脚本生成的 systemd 服务已加入 `CAP_NET_BIND_SERVICE`，服务用户可绑定
-  低端口；手动运行需要 root 或同等 capability。
+- 安装脚本生成的 systemd 服务已加入 `CAP_NET_BIND_SERVICE`，OpenRC 配置用
+  `capabilities="cap_net_bind_service"` 达到同样效果，服务用户可绑定低端口；
+  手动运行需要 root 或同等 capability。
 - 证书状态写入主控后，订阅会额外生成一个 `昵称 · 证书` 节点；域名已经在
   `hosts` 或隧道中时不会重复。
 
