@@ -19,10 +19,14 @@ type Signal struct {
 //
 // Supported 当前构建固定为 true，保留字段用于兼容旧主控；URL 是
 // Cloudflare 分配的 *.trycloudflare.com 地址，不可用时为空。
+//
+// EdgeLocation 是 cloudflared 注册隧道时边缘返回的数据中心代码（IATA，
+// 例如 hkg/nrt/sjc），用于排查“隧道连到了哪个 colo”。未连接时为空。
 type Report struct {
-	Supported bool   `json:"supported"`
-	URL       string `json:"url,omitempty"`
-	Error     string `json:"error,omitempty"`
+	Supported    bool   `json:"supported"`
+	URL          string `json:"url,omitempty"`
+	EdgeLocation string `json:"edgeLocation,omitempty"`
+	Error        string `json:"error,omitempty"`
 }
 
 // Controller 抽象临时隧道生命周期。
