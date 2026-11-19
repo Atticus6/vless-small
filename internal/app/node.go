@@ -231,7 +231,7 @@ func StartNodeSync(
 	}
 	if result != nil {
 		if result.Tunnel != nil {
-			tunnelCtl.Sync(result.Tunnel.Enabled)
+			tunnelCtl.Sync(*result.Tunnel)
 		}
 		if result.Cert != nil {
 			certCtl.Sync(result.Cert.Domain)
@@ -281,7 +281,7 @@ func syncLoop(
 		}
 
 		if result.Tunnel != nil {
-			tunnelCtl.Sync(result.Tunnel.Enabled)
+			tunnelCtl.Sync(*result.Tunnel)
 		}
 		if result.Cert != nil {
 			certCtl.Sync(result.Cert.Domain)

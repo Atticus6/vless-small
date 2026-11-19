@@ -12,7 +12,7 @@ func New(string) Controller {
 
 type tunnelControllerStub struct{}
 
-func (tunnelControllerStub) Sync(bool) {}
+func (tunnelControllerStub) Sync(Signal) {}
 
 func (tunnelControllerStub) Status() Report {
 	return Report{Supported: false}

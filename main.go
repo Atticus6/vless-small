@@ -28,7 +28,6 @@ var version = "dev"
 func main() {
 	cfg := parseFlags()
 	app.Version = version
-	tunnel.Version = version
 
 	// 版本查询必须在配置校验之前：安装脚本用它确认二进制可执行。
 	if cfg.showVersion {

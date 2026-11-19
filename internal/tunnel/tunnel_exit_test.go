@@ -8,13 +8,13 @@ import (
 )
 
 // TestSupervisorExitClearsState 验证 supervisor 意外退出后会清空 URL 与
-// cancel，使下一次 Sync(true) 能重新申请隧道（而不是永久保留失效地址）。
+// cancel，使下一次 Sync 能重新启动隧道（而不是永久保留失效状态）。
 func TestSupervisorExitClearsState(t *testing.T) {
 	canceled := false
-	tun := &quickTunnel{
+	tun := &fixedTunnel{
 		enabled:    true,
 		cancel:     func() { canceled = true },
-		url:        "https://abc.trycloudflare.com",
+		url:        "https://hk-tunnel.atticus.eu.org",
 		generation: 3,
 	}
 
@@ -38,9 +38,9 @@ func TestSupervisorExitClearsState(t *testing.T) {
 // TestSupervisorExitWithoutErrorUsesRetryMessage 覆盖 ctx 未取消但 supervisor
 // 正常返回的情况：仍然要清空状态并给出可重试的提示。
 func TestSupervisorExitWithoutErrorUsesRetryMessage(t *testing.T) {
-	tun := &quickTunnel{
+	tun := &fixedTunnel{
 		enabled:    true,
-		url:        "https://abc.trycloudflare.com",
+		url:        "https://old-tunnel.atticus.eu.org",
 		generation: 1,
 	}
 
@@ -58,17 +58,17 @@ func TestSupervisorExitWithoutErrorUsesRetryMessage(t *testing.T) {
 // TestSupervisorExitIgnoresStaleGeneration 验证旧代 supervisor 的退出事件
 // 不会清掉新一代已经建立的隧道。
 func TestSupervisorExitIgnoresStaleGeneration(t *testing.T) {
-	tun := &quickTunnel{
+	tun := &fixedTunnel{
 		enabled:    true,
 		cancel:     func() {},
-		url:        "https://new.trycloudflare.com",
+		url:        "https://new-tunnel.atticus.eu.org",
 		generation: 5,
 	}
 
 	tun.supervisorExited(4, errors.New("old tunnel failed"))
 
 	status := tun.Status()
-	if status.URL != "https://new.trycloudflare.com" {
+	if status.URL != "https://new-tunnel.atticus.eu.org" {
 		t.Fatalf("URL = %q, want the current tunnel", status.URL)
 	}
 	if status.Error != "" {
@@ -82,7 +82,7 @@ func TestSupervisorExitIgnoresStaleGeneration(t *testing.T) {
 // TestSupervisorExitIgnoredAfterClose 验证 Close 之后到达的退出事件不会
 // 把状态改回可重试。
 func TestSupervisorExitIgnoredAfterClose(t *testing.T) {
-	tun := &quickTunnel{closed: true, generation: 2}
+	tun := &fixedTunnel{closed: true, generation: 2}
 
 	tun.supervisorExited(2, errors.New("late error"))
 

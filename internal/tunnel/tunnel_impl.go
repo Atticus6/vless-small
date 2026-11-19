@@ -5,13 +5,12 @@ package tunnel
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
 	"runtime"
 	"strconv"
@@ -77,9 +76,6 @@ const (
 	tunnelQUICConnFlowLimit   = 8 * (1 << 20) // 8 MiB
 	tunnelQUICStreamFlowLimit = 2 * (1 << 20) // 2 MiB
 
-	// Quick Tunnel 分配接口；返回随机 *.trycloudflare.com 地址和临时凭证。
-	tunnelAPIURL     = "https://api.trycloudflare.com/tunnel"
-	tunnelAPITimeout = 30 * time.Second
 	// 上报给 Cloudflare 的客户端版本标识，不影响隧道功能。
 	tunnelBuildVersion = "2025.2.0"
 )
@@ -163,29 +159,31 @@ func Supported() bool { return true }
 
 func New(listen string) Controller {
 	port, err := localTunnelPort(listen)
-	return &quickTunnel{
+	return &fixedTunnel{
 		port:    port,
 		portErr: err,
 	}
 }
 
-type quickTunnel struct {
+type fixedTunnel struct {
 	mu sync.Mutex
 
 	port    int
 	portErr error
 
-	enabled bool
-	closed  bool
-	cancel  context.CancelFunc
-	url     string
-	lastErr string
+	enabled  bool
+	closed   bool
+	cancel   context.CancelFunc
+	token    string
+	hostname string
+	url      string
+	lastErr  string
 	// generation 每次启动/停止都会递增，用于丢弃上一代 supervisor 的退出事件。
 	generation int
 }
 
-// Sync 启动/停止临时隧道；重复调用是幂等的。
-func (t *quickTunnel) Sync(enabled bool) {
+// Sync 启动/停止固定隧道；token 或 hostname 变化时会重启 supervisor。
+func (t *fixedTunnel) Sync(signal Signal) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -193,23 +191,32 @@ func (t *quickTunnel) Sync(enabled bool) {
 		return
 	}
 
-	if enabled {
-		t.enabled = true
-		// 上次启动失败时 cancel 为空，这里会重试；隧道已运行时直接返回。
-		if t.cancel == nil {
-			t.startLocked()
+	if !signal.Enabled {
+		if !t.enabled && t.cancel == nil {
+			return
 		}
+		t.enabled = false
+		t.token = ""
+		t.hostname = ""
+		t.stopLocked()
 		return
 	}
 
-	if !t.enabled && t.cancel == nil {
+	hostname := normalizeTunnelHostname(signal.Hostname)
+	t.enabled = true
+	// 已用同一份 token/hostname 运行中：只更新期望地址，不重启。
+	if t.cancel != nil && t.token == signal.Token && t.hostname == hostname {
+		t.url = tunnelURL(hostname)
 		return
 	}
-	t.enabled = false
+
 	t.stopLocked()
+	t.token = signal.Token
+	t.hostname = hostname
+	t.startLocked()
 }
 
-func (t *quickTunnel) Status() Report {
+func (t *fixedTunnel) Status() Report {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -220,7 +227,7 @@ func (t *quickTunnel) Status() Report {
 	}
 }
 
-func (t *quickTunnel) Close() {
+func (t *fixedTunnel) Close() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -229,31 +236,46 @@ func (t *quickTunnel) Close() {
 	}
 	t.closed = true
 	t.enabled = false
+	t.token = ""
+	t.hostname = ""
 	t.stopLocked()
 }
 
-// startLocked 申请并启动新的 Quick Tunnel；调用方必须持有 t.mu。
-func (t *quickTunnel) startLocked() {
+// startLocked 使用主控下发的 token/hostname 启动 cloudflared supervisor。
+// 调用方必须持有 t.mu。
+func (t *fixedTunnel) startLocked() {
 	if t.portErr != nil {
 		t.lastErr = t.portErr.Error()
 		return
 	}
+	if strings.TrimSpace(t.token) == "" {
+		t.lastErr = "未配置固定隧道 token"
+		return
+	}
+	if t.hostname == "" {
+		t.lastErr = "未配置固定隧道 hostname"
+		return
+	}
 
 	// 换代后再启动：即使旧 supervisor 立刻退出，它的回调也会因为
-	// generation 不匹配而忽略，不会清掉本次新分配的 URL。
+	// generation 不匹配而忽略，不会清掉本次的新状态。
 	t.generation++
 	generation := t.generation
 
 	ctx, cancel := context.WithCancel(context.Background())
 	protocol := tunnelProtocol()
 	log.Printf(
-		"tunnel: starting protocol=%s ha_connections=%d log_level=%s",
-		protocol, tunnelHAConnections(), tunnelLogLevel(),
+		"tunnel: starting fixed hostname=%s protocol=%s ha_connections=%d log_level=%s",
+		t.hostname, protocol, tunnelHAConnections(), tunnelLogLevel(),
 	)
-	url, err := createCloudflareTunnel(ctx, t.port, protocol, func(err error) {
-		t.supervisorExited(generation, err)
-	})
-	if err != nil {
+	if err := createNamedTunnel(
+		ctx,
+		t.port,
+		t.hostname,
+		t.token,
+		protocol,
+		func(err error) { t.supervisorExited(generation, err) },
+	); err != nil {
 		cancel()
 		t.lastErr = err.Error()
 		log.Printf("tunnel: start failed: %v", err)
@@ -261,13 +283,13 @@ func (t *quickTunnel) startLocked() {
 	}
 
 	t.cancel = cancel
-	t.url = url
+	t.url = tunnelURL(t.hostname)
 	t.lastErr = ""
-	log.Printf("tunnel: %s", url)
+	log.Printf("tunnel: %s", t.url)
 }
 
 // stopLocked 取消隧道上下文；cloudflared supervisor 会随 ctx 退出。
-func (t *quickTunnel) stopLocked() {
+func (t *fixedTunnel) stopLocked() {
 	t.generation++
 	if t.cancel != nil {
 		t.cancel()
@@ -278,10 +300,10 @@ func (t *quickTunnel) stopLocked() {
 
 // supervisorExited 在 cloudflared supervisor 意外退出后清理隧道状态。
 //
-// 清空 cancel 与 URL 后，下一次 Sync(true) 会重新申请隧道；否则节点会
-// 一直上报一个已经失效的 trycloudflare 地址，订阅里也会留下连不上的节点。
+// 清空 cancel 与 URL 后，下一次 Sync 会重新启动；固定 hostname 仍保存在
+// 主控数据库和订阅里，节点会在下一轮上报后重连。
 // generation 用于忽略已被 stopLocked 或新一次 startLocked 取代的旧 goroutine。
-func (t *quickTunnel) supervisorExited(generation int, err error) {
+func (t *fixedTunnel) supervisorExited(generation int, err error) {
 	message := "隧道连接已断开，将在下次同步后重试"
 	if err != nil {
 		message = err.Error()
@@ -304,25 +326,32 @@ func (t *quickTunnel) supervisorExited(generation int, err error) {
 	log.Printf("tunnel: %s", message)
 }
 
-// createCloudflareTunnel 申请临时隧道并在后台启动 cloudflared supervisor。
+// createNamedTunnel 用固定 token/hostname 启动 cloudflared supervisor。
 //
-// 这里的实现参考 cloudflared 的 RunQuickTunnel，但直接调用公开包，把
-// cloudflared 编译进当前进程；返回的 URL 在隧道重启后会变化。
+// token 是 Cloudflare 控制台/API 生成的命名隧道 token；ingress 只接受该
+// hostname，未知 Host 返回 404，避免隧道被当成通用代理。
 // onExit 在 supervisor 退出时调用（含主动停止），由调用方按 generation
 // 判断是否需要清理状态。
-func createCloudflareTunnel(
+func createNamedTunnel(
 	ctx context.Context,
 	port int,
+	hostname string,
+	token string,
 	protocol string,
 	onExit func(error),
-) (string, error) {
+) error {
 	switch protocol {
 	case "", "auto", "quic", "http2":
 		if protocol == "" {
 			protocol = "auto"
 		}
 	default:
-		return "", fmt.Errorf("unsupported tunnel protocol %q", protocol)
+		return fmt.Errorf("unsupported tunnel protocol %q", protocol)
+	}
+
+	credentials, err := parseTunnelToken(token)
+	if err != nil {
+		return err
 	}
 
 	tunnelMetricsOnce.Do(func() {
@@ -331,7 +360,7 @@ func createCloudflareTunnel(
 
 	clientID, err := uuid.NewRandom()
 	if err != nil {
-		return "", fmt.Errorf("can't generate connector UUID: %w", err)
+		return fmt.Errorf("can't generate connector UUID: %w", err)
 	}
 
 	logTransport := logger.Create(
@@ -341,11 +370,15 @@ func createCloudflareTunnel(
 
 	ing, err := ingress.ParseIngress(&cfconfig.Configuration{
 		Ingress: []cfconfig.UnvalidatedIngressRule{
-			{Service: fmt.Sprintf("http://localhost:%d", port)},
+			{
+				Hostname: hostname,
+				Service:  fmt.Sprintf("http://localhost:%d", port),
+			},
+			{Service: "http_status:404"},
 		},
 	})
 	if err != nil {
-		return "", fmt.Errorf("can't parse ingress: %w", err)
+		return fmt.Errorf("can't parse ingress: %w", err)
 	}
 
 	orchestrator, err := orchestration.NewOrchestrator(
@@ -361,7 +394,7 @@ func createCloudflareTunnel(
 		logTransport,
 	)
 	if err != nil {
-		return "", fmt.Errorf("can't create orchestrator: %w", err)
+		return fmt.Errorf("can't create orchestrator: %w", err)
 	}
 
 	protocolSelector, err := connection.NewProtocolSelector(
@@ -374,17 +407,22 @@ func createCloudflareTunnel(
 		logTransport,
 	)
 	if err != nil {
-		return "", fmt.Errorf("unable to create protocol selector: %w", err)
+		return fmt.Errorf("unable to create protocol selector: %w", err)
 	}
 
 	edgeTLSConfigs, err := buildEdgeTLSConfigs()
 	if err != nil {
-		return "", err
+		return err
 	}
 
-	tunnel, err := createQuickTunnel(clientID)
-	if err != nil {
-		return "", err
+	tunnel := &connection.TunnelProperties{
+		Credentials: credentials,
+		Client: pogs.ClientInfo{
+			ClientID: clientID[:],
+			Features: []string{},
+			Version:  tunnelBuildVersion,
+			Arch:     runtime.GOOS + "_" + runtime.GOARCH,
+		},
 	}
 
 	tunnelConfig := buildTunnelConfig(clientID, tunnel, observer, logTransport, protocolSelector, edgeTLSConfigs)
@@ -411,7 +449,42 @@ func createCloudflareTunnel(
 		onExit(exitErr)
 	}()
 
-	return "https://" + tunnel.QuickTunnelUrl, nil
+	return nil
+}
+
+// parseTunnelToken 解析 Cloudflare 命名隧道 token（base64 JSON）。
+func parseTunnelToken(value string) (connection.Credentials, error) {
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
+	if err != nil {
+		return connection.Credentials{}, fmt.Errorf("decode tunnel token: %w", err)
+	}
+
+	var token connection.TunnelToken
+	if err := json.Unmarshal(decoded, &token); err != nil {
+		return connection.Credentials{}, fmt.Errorf("parse tunnel token: %w", err)
+	}
+	if token.AccountTag == "" || token.TunnelID == uuid.Nil || len(token.TunnelSecret) == 0 {
+		return connection.Credentials{}, fmt.Errorf("tunnel token is missing account, id or secret")
+	}
+	return token.Credentials(), nil
+}
+
+// normalizeTunnelHostname 只保留裸 hostname，去掉协议、路径和末尾点。
+func normalizeTunnelHostname(value string) string {
+	hostname := strings.ToLower(strings.TrimSpace(value))
+	hostname = strings.TrimPrefix(hostname, "https://")
+	hostname = strings.TrimPrefix(hostname, "http://")
+	if index := strings.IndexAny(hostname, "/?#"); index >= 0 {
+		hostname = hostname[:index]
+	}
+	return strings.TrimSuffix(hostname, ".")
+}
+
+func tunnelURL(hostname string) string {
+	if hostname == "" {
+		return ""
+	}
+	return "https://" + hostname
 }
 
 func buildEdgeTLSConfigs() (map[connection.Protocol]*tls.Config, error) {
@@ -476,83 +549,4 @@ func buildTunnelConfig(
 		QUICStreamLevelFlowControlLimit:     quicStreamFlow,
 		ICMPRouterServer:                    nil,
 	}
-}
-
-// createQuickTunnel 调 Cloudflare 的临时隧道分配接口，拿到随机域名和凭证。
-func createQuickTunnel(clientID uuid.UUID) (*connection.TunnelProperties, error) {
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSHandshakeTimeout:   tunnelAPITimeout,
-			ResponseHeaderTimeout: tunnelAPITimeout,
-		},
-		Timeout: tunnelAPITimeout,
-	}
-
-	req, err := http.NewRequest(http.MethodPost, tunnelAPIURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build tunnel request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "cloudflared/embedded-vless-small")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to request tunnel: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("tunnel provisioning failed with status %d", resp.StatusCode)
-	}
-
-	var result createTunnelResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-	if !result.Success {
-		return nil, fmt.Errorf("tunnel creation failed: %v", result.Errors)
-	}
-
-	tunnelID, err := uuid.Parse(result.Result.ID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse tunnel ID: %w", err)
-	}
-
-	return &connection.TunnelProperties{
-		Credentials: connection.Credentials{
-			AccountTag:   result.Result.AccountTag,
-			TunnelSecret: result.Result.Secret,
-			TunnelID:     tunnelID,
-		},
-		QuickTunnelUrl: result.Result.Hostname,
-		Client: pogs.ClientInfo{
-			ClientID: clientID[:],
-			Features: []string{},
-			Version:  tunnelBuildVersion,
-			Arch:     runtime.GOOS + "_" + runtime.GOARCH,
-		},
-	}, nil
-}
-
-type createTunnelResponse struct {
-	Success bool                `json:"success"`
-	Result  tunnelCredentials   `json:"result"`
-	Errors  []createTunnelError `json:"errors"`
-}
-
-type createTunnelError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-type tunnelCredentials struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Hostname   string `json:"hostname"`
-	AccountTag string `json:"account_tag"`
-	Secret     []byte `json:"secret"`
 }

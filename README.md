@@ -12,7 +12,7 @@
 | `main.go` | 组装 `app`/`tunnel`/`cert`，启动 HTTP 服务与优雅退出 |
 | `config.go` | 命令行/环境变量解析、路径规范化 |
 | `internal/app/` | 核心服务：`server.go`（用户表、健康检查）、`websocket.go`、`protocol.go`、`node.go`（CONFIG、上报、设备同步）、`push.go`、`update.go`、`platform.go`、`users.go`、`constants.go`；`egress*.go` 负责出口 IP 检测与 `/ipN` 路径选择，`traffic.go` 负责按设备统计与上报流量 |
-| `internal/tunnel/` | 临时隧道控制器：内嵌官方 cloudflared supervisor，申请并运行 Quick Tunnel |
+| `internal/tunnel/` | 固定隧道控制器：内嵌官方 cloudflared supervisor，使用命名隧道 token 运行 |
 | `internal/cert/` | ACME 自动证书：`cert_common.go`、`cert_impl.go`、`cert_stub.go` |
 | `internal/platform/` | 运行平台识别（local / Vercel / Railway / Northflank 等） |
 | `version.txt` | 当前版本号，Release workflow 唯一版本来源 |
@@ -145,11 +145,14 @@ curl -fsSL -H "Authorization: Bearer <node token>" \
 ```bash
 go test ./...
 
-# 可选：真实 Quick Tunnel 集成测试（会向 Cloudflare 申请临时隧道）
-TUNNEL_INTEGRATION=1 go test ./internal/tunnel -run TestQuickTunnelProvisioning -v -timeout 240s
+# 可选：真实固定隧道集成测试（需要已创建的 Cloudflare 命名隧道）
+TUNNEL_INTEGRATION=1 \
+TUNNEL_TOKEN='<cloudflare tunnel token>' \
+TUNNEL_HOSTNAME='hk-tunnel.atticus.eu.org' \
+go test ./internal/tunnel -run TestFixedTunnelProvisioning -v -timeout 240s
 ```
 
-真实联调测试需要出站 UDP 7844（QUIC）或 TCP 7844（HTTP/2），并会在公网创建一条临时隧道（测试结束后关闭）。
+真实联调测试需要出站 UDP 7844（QUIC）或 TCP 7844（HTTP/2），并使用一个已存在的命名隧道 token/hostname。
 
 ## 自动更新（Web 下发）
 
@@ -255,24 +258,24 @@ docker run -d --restart=always --name vless-small \
 UUID，`blob2` 是节点 id，`double1/2` 是上传/下载字节，时间由 Analytics
 Engine 自动记录。设备或节点已不存在时也照常写入。
 
-## 临时隧道（Quick Tunnel）
+## 固定隧道（Cloudflare Named Tunnel）
 
 非 Vercel 构建直接内嵌**官方 cloudflared Go 实现**（`github.com/cloudflare/cloudflared`），
 调用其 `supervisor`、`connection`、`orchestration` 等包，把 cloudflared 编译进
-当前进程；节点上不需要安装 cloudflared 二进制。节点向
-`https://api.trycloudflare.com/tunnel` 申请临时隧道，再由 cloudflared supervisor
-连接 Cloudflare 边缘并转发 HTTP/WebSocket。
+当前进程；节点上不需要安装 cloudflared 二进制。主控自动创建命名隧道并把
+token + hostname 下发给节点，节点用 token 连接 Cloudflare 边缘并转发
+HTTP/WebSocket。
 
 运行时行为：
 
-- 主控的“VLESS 管理 → 临时隧道”按节点开关，默认开启；节点在每次上报
-  （≤60 秒）时读取 `tunnel.enabled`，启动/停止隧道。
-- Quick Tunnel 地址形如 `https://random-words.trycloudflare.com`，
-  **进程重启或重新申请后会变化**；需要固定地址请改用 Cloudflare 命名隧道。
-- 地址随 `/api/nodes/report` 上报，主控写入 `vless.tunnel_address`，列表和
-  指标弹框可直接看到。
-- 隧道固定回源到 `http://127.0.0.1:<PORT>`，复用同一个 HTTP handler（健康检查
-  与 WebSocket）。
+- 主控的“VLESS 管理 → 固定隧道”按节点开关，默认开启；节点在每次上报
+  （≤60 秒）时读取 `tunnel: { enabled, token, hostname }`，启动/停止隧道。
+- 固定地址形如 `https://hk-tunnel.atticus.eu.org`，由主控分配并写入 DNS
+  CNAME，**进程重启不会变化**；不再使用 `*.trycloudflare.com` 临时地址。
+- 节点地址随 `/api/nodes/report` 上报，主控写入 `vless.tunnel_address`，
+  列表和指标弹框可直接看到。
+- 隧道固定回源到 `http://127.0.0.1:<PORT>`，只接受分配的 hostname，未知
+  Host 返回 404。
 - 协议默认 `auto`，由 cloudflared 自动选择 QUIC 或 HTTP/2；可用
   `TUNNEL_PROTOCOL=quic|http2|auto` 固定。
 - QUIC 需要出站 UDP 7844，HTTP/2 需要出站 TCP 7844。
@@ -311,8 +314,8 @@ Environment=GOGC=50
 `GOMEMLIMIT` 是软上限，超过后会更积极地 GC；`GOGC=50` 降低堆增长，
 两者都会用一些 CPU 换内存。不要设置得低于实际峰值，否则会频繁 GC。
 
-> Quick Tunnel 仅适合临时/个人使用，Cloudflare 不提供可用性保证；生产环境
-> 建议使用带固定域名的命名隧道。
+> 固定隧道依赖 Cloudflare 账号中的命名隧道和 `atticus.eu.org` DNS；主控需要
+> 配置 `CLOUDFLARE_API_TOKEN`（Tunnel Edit + DNS Edit + Zone Read）。
 
 ## 自动 HTTPS 证书
 
@@ -430,7 +433,7 @@ curl -fsS "http://127.0.0.1:8080/${TOKEN}/config"
   },
   "tunnel": {
     "supported": true,
-    "url": "https://random-words.trycloudflare.com"
+    "url": "https://hk-tunnel.atticus.eu.org"
   },
   "cert": {
     "supported": true,
@@ -518,7 +521,7 @@ vless://<DEVICE_ID>@<HOST>:<PORT>?encryption=none&security=none&type=ws&path=%2F
 ## 说明
 
 - 基础依赖只有 `github.com/gorilla/websocket`；非 Vercel 构建额外内嵌
-  官方 `github.com/cloudflare/cloudflared`（Quick Tunnel）及其依赖，Vercel
+  官方 `github.com/cloudflare/cloudflared`（固定隧道）及其依赖，Vercel
   构建使用 `-tags vercel` 剔除隧道实现。
 - 每条连接首条 WS 消息是 VLESS 请求头，响应头为 `[0x00, 0x00]`。
 - 支持 `cmd=1`（TCP）与 `cmd=2`（UDP，`[2B 长度][数据]` 分包）。

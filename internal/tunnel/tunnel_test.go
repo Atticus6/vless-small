@@ -37,7 +37,7 @@ func TestTunnelControllerDisabledNoop(t *testing.T) {
 	ctl := New(":8080")
 	defer ctl.Close()
 
-	ctl.Sync(false)
+	ctl.Sync(Signal{})
 	status := ctl.Status()
 	if status.URL != "" {
 		t.Fatalf("disabled tunnel URL = %q, want empty", status.URL)
