@@ -5,7 +5,6 @@ package tunnel
 import (
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,8 +82,7 @@ const (
 	tunnelBuildVersion = "2026.11.1"
 
 	// quickTunnelService 是 Cloudflare 的无账号临时隧道申请地址。
-	// 固定隧道尚未分配时用它兜底；可用 TUNNEL_QUICK_SERVICE 覆盖，
-	// 便于测试或使用兼容服务。
+	// 可用 TUNNEL_QUICK_SERVICE 覆盖，便于测试或使用兼容服务。
 	quickTunnelService = "https://api.trycloudflare.com"
 	quickTunnelTimeout = 20 * time.Second
 )
@@ -96,26 +94,6 @@ var quickTunnelHTTPClient = &http.Client{
 		TLSHandshakeTimeout:   quickTunnelTimeout,
 		ResponseHeaderTimeout: quickTunnelTimeout,
 	},
-}
-
-// tunnelMode 表示当前 cloudflared 使用的是固定隧道还是临时隧道。
-type tunnelMode int
-
-const (
-	tunnelModeQuick tunnelMode = iota
-	tunnelModeFixed
-)
-
-// selectTunnelMode 根据主控下发的字段决定隧道类型。
-//
-// token 与 hostname 必须同时存在才视为固定隧道；只有其中一个时按未分配
-// 处理，回退临时隧道，避免用不完整配置启动 cloudflared 后一直报错。
-func selectTunnelMode(token, hostname string) tunnelMode {
-	if strings.TrimSpace(token) != "" &&
-		normalizeTunnelHostname(hostname) != "" {
-		return tunnelModeFixed
-	}
-	return tunnelModeQuick
 }
 
 // tunnelHAConnections 返回与 Cloudflare 边缘保持的连接数。
@@ -197,37 +175,32 @@ func Supported() bool { return true }
 
 func New(listen string) Controller {
 	port, err := localTunnelPort(listen)
-	return &fixedTunnel{
+	return &controller{
 		port:    port,
 		portErr: err,
 	}
 }
 
-type fixedTunnel struct {
+type controller struct {
 	mu sync.Mutex
 
 	port    int
 	portErr error
 
-	enabled  bool
-	closed   bool
-	cancel   context.CancelFunc
-	mode     tunnelMode
-	token    string
-	hostname string
-	// quickURL 是临时隧道地址；固定隧道下为空。
-	quickURL string
-	url      string
-	lastErr  string
+	enabled bool
+	closed  bool
+	cancel  context.CancelFunc
+	url     string
+	lastErr string
 	// generation 每次启动/停止都会递增，用于丢弃上一代 supervisor 的退出事件。
 	generation int
 }
 
-// Sync 启动/停止隧道；固定隧道配置变化时重启 supervisor。
+// Sync 启动/停止临时隧道。
 //
-// Enabled=true 但没有 token/hostname 时启动临时隧道；主控随后分配固定
-// 隧道后，下一次 Sync 会自动停止临时隧道并切换到固定域名。
-func (t *fixedTunnel) Sync(signal Signal) {
+// 开启后重复调用不会重新申请地址；supervisor 退出或申请失败会清空
+// cancel，下一次 Sync 重新申请。
+func (t *controller) Sync(signal Signal) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -240,46 +213,19 @@ func (t *fixedTunnel) Sync(signal Signal) {
 			return
 		}
 		t.enabled = false
-		t.token = ""
-		t.hostname = ""
-		t.quickURL = ""
 		t.stopLocked()
 		return
 	}
 
-	token := strings.TrimSpace(signal.Token)
-	hostname := normalizeTunnelHostname(signal.Hostname)
-	mode := selectTunnelMode(token, hostname)
 	t.enabled = true
-
-	// 已经是同一种隧道且配置未变：只刷新期望地址，不重启。
-	if t.cancel != nil && t.mode == mode {
-		if mode == tunnelModeFixed {
-			if t.token == token && t.hostname == hostname {
-				t.url = tunnelURL(hostname)
-				return
-			}
-		} else {
-			// 临时隧道地址由申请协程写入；运行中重复 Sync 不能重启，
-			// 否则每次上报都会换一个新域名。
-			return
-		}
-	}
-
-	t.stopLocked()
-	t.mode = mode
-	t.token = token
-	t.hostname = hostname
-	t.quickURL = ""
-
-	if mode == tunnelModeFixed {
-		t.startFixedLocked()
+	// 运行中或正在申请：不能重启，否则每次上报都会换一个新域名。
+	if t.cancel != nil {
 		return
 	}
-	t.startQuickLocked()
+	t.startLocked()
 }
 
-func (t *fixedTunnel) Status() Report {
+func (t *controller) Status() Report {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -290,7 +236,7 @@ func (t *fixedTunnel) Status() Report {
 	}
 }
 
-func (t *fixedTunnel) Close() {
+func (t *controller) Close() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -299,34 +245,14 @@ func (t *fixedTunnel) Close() {
 	}
 	t.closed = true
 	t.enabled = false
-	t.token = ""
-	t.hostname = ""
 	t.stopLocked()
 }
 
-// startFixedLocked 使用主控下发的 token/hostname 启动固定隧道。
-// 调用方必须持有 t.mu。
-func (t *fixedTunnel) startFixedLocked() {
-	if t.portErr != nil {
-		t.lastErr = t.portErr.Error()
-		return
-	}
-
-	credentials, err := parseTunnelToken(t.token)
-	if err != nil {
-		t.lastErr = err.Error()
-		log.Printf("tunnel: parse fixed token failed: %v", err)
-		return
-	}
-
-	t.launchLocked(t.hostname, credentials, "")
-}
-
-// startQuickLocked 申请并启动临时隧道。
+// startLocked 申请并启动临时隧道。
 //
 // 申请是网络请求，放在独立 goroutine 中，避免阻塞上报循环和 Status()；
 // 失败时清空 cancel，下一次 Sync 会重新申请。调用方必须持有 t.mu。
-func (t *fixedTunnel) startQuickLocked() {
+func (t *controller) startLocked() {
 	if t.portErr != nil {
 		t.lastErr = t.portErr.Error()
 		return
@@ -342,7 +268,7 @@ func (t *fixedTunnel) startQuickLocked() {
 	t.url = ""
 	t.lastErr = ""
 	log.Printf(
-		"tunnel: fixed tunnel not assigned, starting quick tunnel protocol=%s log_level=%s",
+		"tunnel: starting quick tunnel protocol=%s log_level=%s",
 		protocol, tunnelLogLevel(),
 	)
 
@@ -353,14 +279,13 @@ func (t *fixedTunnel) startQuickLocked() {
 			return
 		}
 
-		// 申请期间可能已经分配固定隧道或被关闭；丢弃过期结果。
+		// 申请期间可能已被关闭或换代；丢弃过期结果。
 		t.mu.Lock()
-		if t.closed || t.generation != generation || t.mode != tunnelModeQuick {
+		if t.closed || t.generation != generation {
 			t.mu.Unlock()
 			cancel()
 			return
 		}
-		t.quickURL = quick.URL
 		t.url = quick.URL
 		t.lastErr = ""
 		t.mu.Unlock()
@@ -369,7 +294,6 @@ func (t *fixedTunnel) startQuickLocked() {
 		if err := startTunnel(
 			ctx,
 			port,
-			"",
 			quick.Credentials,
 			quick.URL,
 			protocol,
@@ -380,54 +304,11 @@ func (t *fixedTunnel) startQuickLocked() {
 	}()
 }
 
-// launchLocked 为固定隧道创建上下文并启动 supervisor。
-// 调用方必须持有 t.mu。
-func (t *fixedTunnel) launchLocked(
-	ingressHostname string,
-	credentials connection.Credentials,
-	quickURL string,
-) {
-	// 换代后再启动：即使旧 supervisor 立刻退出，它的回调也会因为
-	// generation 不匹配而忽略，不会清掉本次的新状态。
-	t.generation++
-	generation := t.generation
-
-	ctx, cancel := context.WithCancel(context.Background())
-	protocol := tunnelProtocol()
-	t.cancel = cancel
-	t.url = ""
-	t.quickURL = quickURL
-	t.lastErr = ""
-	log.Printf(
-		"tunnel: starting fixed hostname=%s protocol=%s ha_connections=%d log_level=%s",
-		ingressHostname, protocol, tunnelHAConnections(), tunnelLogLevel(),
-	)
-
-	if err := startTunnel(
-		ctx,
-		t.port,
-		ingressHostname,
-		credentials,
-		quickURL,
-		protocol,
-		func(err error) { t.supervisorExited(generation, err) },
-	); err != nil {
-		cancel()
-		t.cancel = nil
-		t.lastErr = err.Error()
-		log.Printf("tunnel: start failed: %v", err)
-		return
-	}
-
-	t.url = tunnelURL(ingressHostname)
-	log.Printf("tunnel: %s", t.url)
-}
-
 // quickStartFailed 处理临时隧道申请或启动失败。
 //
 // 清空 cancel 后，下一次 Sync 会重新申请；临时隧道地址不可预测，
-// 因此不能像固定隧道那样直接复用旧 URL。
-func (t *fixedTunnel) quickStartFailed(generation int, err error) {
+// 不能复用旧 URL。
+func (t *controller) quickStartFailed(generation int, err error) {
 	message := err.Error()
 
 	t.mu.Lock()
@@ -438,7 +319,6 @@ func (t *fixedTunnel) quickStartFailed(generation int, err error) {
 	cancel := t.cancel
 	t.cancel = nil
 	t.url = ""
-	t.quickURL = ""
 	t.lastErr = message
 	t.mu.Unlock()
 
@@ -449,22 +329,20 @@ func (t *fixedTunnel) quickStartFailed(generation int, err error) {
 }
 
 // stopLocked 取消隧道上下文；cloudflared supervisor 会随 ctx 退出。
-func (t *fixedTunnel) stopLocked() {
+func (t *controller) stopLocked() {
 	t.generation++
 	if t.cancel != nil {
 		t.cancel()
 		t.cancel = nil
 	}
 	t.url = ""
-	t.quickURL = ""
 }
 
 // supervisorExited 在 cloudflared supervisor 意外退出后清理隧道状态。
 //
-// 清空 cancel 与 URL 后，下一次 Sync 会重新启动；固定 hostname 仍保存在
-// 主控数据库和订阅里，节点会在下一轮上报后重连；临时隧道则会申请新地址。
-// generation 用于忽略已被 stopLocked 或新一次启动取代的旧 goroutine。
-func (t *fixedTunnel) supervisorExited(generation int, err error) {
+// 清空 cancel 与 URL 后，下一次 Sync 会重新申请地址；generation 用于忽略
+// 已被 stopLocked 或新一次启动取代的旧 goroutine。
+func (t *controller) supervisorExited(generation int, err error) {
 	message := "隧道连接已断开，将在下次同步后重试"
 	if err != nil {
 		message = err.Error()
@@ -477,7 +355,6 @@ func (t *fixedTunnel) supervisorExited(generation int, err error) {
 	}
 	cancel := t.cancel
 	t.cancel = nil
-	t.quickURL = ""
 	t.url = ""
 	t.lastErr = message
 	t.mu.Unlock()
@@ -488,17 +365,14 @@ func (t *fixedTunnel) supervisorExited(generation int, err error) {
 	log.Printf("tunnel: %s", message)
 }
 
-// startTunnel 用 Cloudflare credentials 启动 cloudflared supervisor。
+// startTunnel 用 Cloudflare quick tunnel 凭据启动 cloudflared supervisor。
 //
-// ingressHostname 为空表示临时隧道：接受任意 Host 回源到本机端口；
-// 非空表示固定隧道，只接受分配的 hostname，未知 Host 返回 404，避免
-// 隧道被当成通用代理。quickURL 仅用于 cloudflared 的 TunnelProperties。
-// onExit 在 supervisor 退出时调用（含主动停止），由调用方按 generation
-// 判断是否需要清理状态。
+// quick tunnel 的域名随机，无法预配置 Hostname；ingress 使用单条无
+// Hostname 规则匹配所有 Host。onExit 在 supervisor 退出时调用（含主动
+// 停止），由调用方按 generation 判断是否需要清理状态。
 func startTunnel(
 	ctx context.Context,
 	port int,
-	ingressHostname string,
 	credentials connection.Credentials,
 	quickURL string,
 	protocol string,
@@ -523,7 +397,7 @@ func startTunnel(
 	observer := connection.NewObserver(logTransport)
 
 	// 新版 cloudflared 把客户端信息收进 client.Config；FeatureSelector 决定
-	// 连接器启用的边缘特性，quick tunnel 与命名隧道都走同一套流程。
+	// 连接器启用的边缘特性。
 	featureSelector, err := features.NewFeatureSelector(
 		ctx,
 		credentials.AccountTag,
@@ -543,23 +417,10 @@ func startTunnel(
 		return fmt.Errorf("can't create client config: %w", err)
 	}
 
-	ingressHostname = normalizeTunnelHostname(ingressHostname)
-	rules := make([]cfconfig.UnvalidatedIngressRule, 0, 2)
-	if ingressHostname != "" {
-		rules = append(rules,
-			cfconfig.UnvalidatedIngressRule{
-				Hostname: ingressHostname,
-				Service:  fmt.Sprintf("http://localhost:%d", port),
-			},
-			// 固定隧道只接受分配的 hostname，其余 Host 一律 404。
-			cfconfig.UnvalidatedIngressRule{Service: "http_status:404"},
-		)
-	} else {
-		// 临时隧道域名随机，无法预配置 Hostname；单条无 Hostname 规则
-		// 即匹配所有 Host。后面不能再跟规则，否则 cloudflared 会拒绝。
-		rules = append(rules, cfconfig.UnvalidatedIngressRule{
-			Service: fmt.Sprintf("http://localhost:%d", port),
-		})
+	// 临时隧道域名随机，无法预配置 Hostname；单条无 Hostname 规则
+	// 即匹配所有 Host。后面不能再跟规则，否则 cloudflared 会拒绝。
+	rules := []cfconfig.UnvalidatedIngressRule{
+		{Service: fmt.Sprintf("http://localhost:%d", port)},
 	}
 
 	ing, err := ingress.ParseIngress(&cfconfig.Configuration{Ingress: rules})
@@ -650,23 +511,6 @@ func startTunnel(
 	return nil
 }
 
-// parseTunnelToken 解析 Cloudflare 命名隧道 token（base64 JSON）。
-func parseTunnelToken(value string) (connection.Credentials, error) {
-	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
-	if err != nil {
-		return connection.Credentials{}, fmt.Errorf("decode tunnel token: %w", err)
-	}
-
-	var token connection.TunnelToken
-	if err := json.Unmarshal(decoded, &token); err != nil {
-		return connection.Credentials{}, fmt.Errorf("parse tunnel token: %w", err)
-	}
-	if token.AccountTag == "" || token.TunnelID == uuid.Nil || len(token.TunnelSecret) == 0 {
-		return connection.Credentials{}, fmt.Errorf("tunnel token is missing account, id or secret")
-	}
-	return token.Credentials(), nil
-}
-
 // quickTunnel 是一次临时隧道申请的结果。
 type quickTunnel struct {
 	URL         string
@@ -734,7 +578,7 @@ func parseQuickTunnelResponse(body []byte) (quickTunnel, error) {
 
 // requestQuickTunnel 向 Cloudflare 申请一条无账号临时隧道。
 //
-// 固定隧道未分配时使用；地址形如 https://random-words.trycloudflare.com。
+// 地址形如 https://random-words.trycloudflare.com。
 // 支持 TUNNEL_QUICK_SERVICE 覆盖服务地址，便于在测试环境替换。
 func requestQuickTunnel(ctx context.Context) (quickTunnel, error) {
 	service := strings.TrimRight(

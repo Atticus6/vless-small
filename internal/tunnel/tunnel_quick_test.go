@@ -4,57 +4,6 @@ package tunnel
 
 import "testing"
 
-func TestSelectTunnelMode(t *testing.T) {
-	tests := []struct {
-		name     string
-		token    string
-		hostname string
-		want     tunnelMode
-	}{
-		{
-			name:     "token 和 hostname 都有时使用固定隧道",
-			token:    "token",
-			hostname: "hk-tunnel.atticus.eu.org",
-			want:     tunnelModeFixed,
-		},
-		{
-			name:     "未分配时回退临时隧道",
-			token:    "",
-			hostname: "",
-			want:     tunnelModeQuick,
-		},
-		{
-			name:     "只有 token 时回退临时隧道",
-			token:    "token",
-			hostname: "",
-			want:     tunnelModeQuick,
-		},
-		{
-			name:     "只有 hostname 时回退临时隧道",
-			token:    "",
-			hostname: "hk-tunnel.atticus.eu.org",
-			want:     tunnelModeQuick,
-		},
-		{
-			name:     "空白字段不视为已分配",
-			token:    "   ",
-			hostname: "  ",
-			want:     tunnelModeQuick,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := selectTunnelMode(tt.token, tt.hostname); got != tt.want {
-				t.Fatalf(
-					"selectTunnelMode(%q, %q) = %v, want %v",
-					tt.token, tt.hostname, got, tt.want,
-				)
-			}
-		})
-	}
-}
-
 func TestParseQuickTunnelResponse(t *testing.T) {
 	const id = "550e8400-e29b-41d4-a716-446655440000"
 	body := []byte(`{

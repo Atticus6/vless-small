@@ -13,44 +13,6 @@ import (
 	"time"
 )
 
-// TestFixedTunnelProvisioning 是可选的真实固定隧道集成测试。
-//
-// 默认跳过；准备一个已创建、DNS 已指向 {tunnelId}.cfargotunnel.com 的
-// Cloudflare 命名隧道，然后运行：
-//
-//	TUNNEL_INTEGRATION=1 \
-//	TUNNEL_TOKEN='<cloudflare tunnel token>' \
-//	TUNNEL_HOSTNAME='hk-tunnel.atticus.eu.org' \
-//	go test ./internal/tunnel -run TestFixedTunnelProvisioning -v
-func TestFixedTunnelProvisioning(t *testing.T) {
-	if os.Getenv("TUNNEL_INTEGRATION") != "1" {
-		t.Skip("set TUNNEL_INTEGRATION=1 to run")
-	}
-
-	token := strings.TrimSpace(os.Getenv("TUNNEL_TOKEN"))
-	hostname := normalizeTunnelHostname(os.Getenv("TUNNEL_HOSTNAME"))
-	if token == "" || hostname == "" {
-		t.Skip("TUNNEL_TOKEN and TUNNEL_HOSTNAME are required")
-	}
-
-	ctl := New(":18080")
-	defer ctl.Close()
-
-	for round := 1; round <= 2; round++ {
-		ctl.Sync(Signal{Enabled: true, Token: token, Hostname: hostname})
-		url := waitTunnelURL(t, ctl, 30*time.Second)
-		if url != "https://"+hostname {
-			t.Fatalf("round %d: URL = %q, want https://%s", round, url, hostname)
-		}
-		t.Logf("round %d: %s", round, url)
-
-		ctl.Sync(Signal{})
-		if status := ctl.Status(); status.URL != "" {
-			t.Fatalf("round %d: URL not cleared after stop: %q", round, status.URL)
-		}
-	}
-}
-
 func waitTunnelURL(t *testing.T, ctl Controller, timeout time.Duration) string {
 	t.Helper()
 
@@ -71,8 +33,8 @@ func waitTunnelURL(t *testing.T, ctl Controller, timeout time.Duration) string {
 
 // TestQuickTunnelProvisioning 是可选的真实临时隧道集成测试。
 //
-// 它会向 Cloudflare 申请一条无账号 quick tunnel，验证固定隧道未分配时
-// 的兜底路径。默认跳过；运行：
+// 它会向 Cloudflare 申请一条无账号 quick tunnel，验证临时隧道从申请到
+// 回源的完整路径。默认跳过；运行：
 //
 //	TUNNEL_QUICK_INTEGRATION=1 go test ./internal/tunnel -run TestQuickTunnelProvisioning -v
 func TestQuickTunnelProvisioning(t *testing.T) {
