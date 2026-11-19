@@ -51,6 +51,12 @@ type Server struct {
 	// tunnelStatus / certStatus 由 main 注入，/<token>/config 返回实时状态。
 	tunnelStatus func() tunnel.Report
 	certStatus   func() cert.Report
+
+	// egress 是启动时检测到的本地出口地址，WS 路径 /ipN 通过它选择源 IP。
+	// 为空表示当前环境不启用按路径选择出口。
+	egress *egressSelector
+	// egressEnabled 由主控开关控制，默认关闭；关闭时 /ipN 不生效。
+	egressEnabled atomic.Bool
 }
 
 // healthResponse 是 /healthz 的响应，只保留探活必需的信息。
@@ -91,6 +97,9 @@ type configResponse struct {
 	// Tunnel / Cert 是内置 Quick Tunnel 与自动证书的实时状态。
 	Tunnel tunnel.Report `json:"tunnel"`
 	Cert   cert.Report   `json:"cert"`
+	// Egress 是本地出口 IPv4 列表，第一项为默认出口；仅 runtime=local 时存在。
+	Egress        []egressAddress `json:"egress,omitempty"`
+	EgressEnabled bool            `json:"egressEnabled"`
 }
 
 // activeUUID 是当前已认证连接的一个 UUID，Connections 是并发连接数.
@@ -163,6 +172,8 @@ func NewServer(users map[[16]byte]struct{}, path string) *Server {
 		startedAt:   time.Now(),
 		staticUsers: make(map[[16]byte]struct{}, len(users)),
 		activeIDs:   make(map[[16]byte]int),
+		// 启动时检测一次；网卡地址变化后需要重启进程。
+		egress: newEgressSelector(detectEgressIPs()),
 		upgrader: websocket.Upgrader{
 			CheckOrigin:     func(*http.Request) bool { return true },
 			ReadBufferSize:  4096,
@@ -355,11 +366,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) bool {
 				Cores:          runtime.NumCPU(),
 				ProcessSeconds: cpuSeconds,
 			},
-			Memory: readMemoryStats(),
-			Disk:   disk,
-			System: s.systemHealth(),
-			Tunnel: tunnel,
-			Cert:   cert,
+			Memory:        readMemoryStats(),
+			Disk:          disk,
+			System:        s.systemHealth(),
+			Tunnel:        tunnel,
+			Cert:          cert,
+			Egress:        s.EgressAddresses(),
+			EgressEnabled: s.EgressEnabled(),
 		})
 		return true
 	}

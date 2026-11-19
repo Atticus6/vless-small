@@ -72,6 +72,19 @@ type nodeReportResponse struct {
 	Tunnel *tunnel.Signal `json:"tunnel,omitempty"`
 	// Cert 是主控下发的证书域名；nil 视为不改变，空字符串表示关闭。
 	Cert *cert.Signal `json:"cert,omitempty"`
+	// Egress 是主控下发的出口选择开关；nil 视为不改变。
+	Egress *egressSignal `json:"egress,omitempty"`
+}
+
+// egressSignal 是主控对“按 /ipN 选择出口”的总开关，默认关闭。
+type egressSignal struct {
+	Enabled bool `json:"enabled"`
+}
+
+// egressReport 是节点上报的出口地址列表和当前开关状态。
+type egressReport struct {
+	Enabled   bool            `json:"enabled"`
+	Addresses []egressAddress `json:"addresses"`
 }
 
 // nodeSyncResult 汇总一次上报拿到的控制指令。
@@ -79,20 +92,23 @@ type nodeSyncResult struct {
 	Update *nodeUpdate
 	Tunnel *tunnel.Signal
 	Cert   *cert.Signal
+	Egress *egressSignal
 }
 
 var syncHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 type nodeReport struct {
-	Name        string        `json:"name"`
-	Runtime     string        `json:"runtime"`
-	Version     string        `json:"version,omitempty"`
-	OS          string        `json:"os,omitempty"`
-	Arch        string        `json:"arch,omitempty"`
-	Tunnel      tunnel.Report `json:"tunnel"`
-	Cert        cert.Report   `json:"cert"`
-	Listen      string        `json:"listen,omitempty"`
-	Path        string        `json:"path,omitempty"`
+	Name    string        `json:"name"`
+	Runtime string        `json:"runtime"`
+	Version string        `json:"version,omitempty"`
+	OS      string        `json:"os,omitempty"`
+	Arch    string        `json:"arch,omitempty"`
+	Tunnel  tunnel.Report `json:"tunnel"`
+	Cert    cert.Report   `json:"cert"`
+	Listen  string        `json:"listen,omitempty"`
+	Path    string        `json:"path,omitempty"`
+	// Egress 是本地出口地址列表和开关状态；非 local 运行时 addresses 为空。
+	Egress      *egressReport `json:"egress,omitempty"`
 	Hosts       []string      `json:"hosts,omitempty"`
 	IPv4        string        `json:"ipv4,omitempty"`
 	IPv6        string        `json:"ipv6,omitempty"`
@@ -199,6 +215,12 @@ func StartNodeSync(
 		info.runtime, info.hosts, info.ipv4, info.ipv6, info.countryCode,
 		tunnel.Supported(), certCtl.Status().Supported,
 	)
+	if addresses := srv.EgressAddresses(); len(addresses) > 0 {
+		log.Printf(
+			"egress candidates detected (enabled=%v): %v",
+			srv.EgressEnabled(), addresses,
+		)
+	}
 
 	result, err := syncDevices(
 		cfg, srv, listen, path, static, info,
@@ -213,6 +235,9 @@ func StartNodeSync(
 		}
 		if result.Cert != nil {
 			certCtl.Sync(result.Cert.Domain)
+		}
+		if result.Egress != nil {
+			srv.SetEgressEnabled(result.Egress.Enabled)
 		}
 		handleNodeUpdate(cfg, result.Update)
 	}
@@ -258,6 +283,9 @@ func syncLoop(
 		if result.Cert != nil {
 			certCtl.Sync(result.Cert.Domain)
 		}
+		if result.Egress != nil {
+			srv.SetEgressEnabled(result.Egress.Enabled)
+		}
 		handleNodeUpdate(cfg, result.Update)
 	}
 }
@@ -273,6 +301,17 @@ func syncDevices(
 	tunnel tunnel.Report,
 	cert cert.Report,
 ) (*nodeSyncResult, error) {
+	// 即使没有检测到地址也上报空数组，节点切换到非 local 运行时 Web 才能
+	// 清掉旧的出口列表。
+	addresses := srv.EgressAddresses()
+	if addresses == nil {
+		addresses = []egressAddress{}
+	}
+	egress := &egressReport{
+		Enabled:   srv.EgressEnabled(),
+		Addresses: addresses,
+	}
+
 	payload, err := json.Marshal(nodeReport{
 		Name:        cfg.Name,
 		Runtime:     info.runtime,
@@ -283,6 +322,7 @@ func syncDevices(
 		Cert:        cert,
 		Listen:      listen,
 		Path:        path,
+		Egress:      egress,
 		Hosts:       info.hosts,
 		IPv4:        info.ipv4,
 		IPv6:        info.ipv6,
@@ -339,5 +379,6 @@ func syncDevices(
 		Update: result.Update,
 		Tunnel: result.Tunnel,
 		Cert:   result.Cert,
+		Egress: result.Egress,
 	}, nil
 }

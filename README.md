@@ -11,7 +11,7 @@
 | --- | --- |
 | `main.go` | 组装 `app`/`tunnel`/`cert`，启动 HTTP 服务与优雅退出 |
 | `config.go` | 命令行/环境变量解析、路径规范化 |
-| `internal/app/` | 核心服务：`server.go`（用户表、健康检查）、`websocket.go`、`protocol.go`、`node.go`（CONFIG、上报、设备同步）、`push.go`、`update.go`、`platform.go`、`users.go`、`constants.go` |
+| `internal/app/` | 核心服务：`server.go`（用户表、健康检查）、`websocket.go`、`protocol.go`、`node.go`（CONFIG、上报、设备同步）、`push.go`、`update.go`、`platform.go`、`users.go`、`constants.go`；`egress*.go` 负责出口 IP 检测与 `/ipN` 路径选择 |
 | `internal/quicktunnel/` | 纯 Go Quick Tunnel 客户端：Cap'n Proto RPC、QUIC 边缘连接、HTTP/WebSocket 转发 |
 | `internal/tunnel/` | 临时隧道控制器：`tunnel_common.go`、`tunnel_impl.go`、`tunnel_stub.go` |
 | `internal/cert/` | ACME 自动证书：`cert_common.go`、`cert_impl.go`、`cert_stub.go` |
@@ -187,6 +187,41 @@ docker run -d --restart=always --name vless-small \
 首轮升级：旧版本节点不认识 `update` 字段，需要手动重跑一次安装脚本或更新
 镜像，之后 Web 按钮才会生效。SaaS 自动休眠运行时（Vercel/Railway）不会后台
 轮询，Web 会拒绝下发。
+
+## 出口 IP 选择（runtime=local）
+
+在 Debian / Ubuntu / Alpine 等 Linux 上，如果默认路由网卡配置了多个 IPv4，
+可以让不同 WebSocket 路径从不同源 IP 出站：
+
+- `/ip1`：默认出口（与普通 `/ws` 相同）
+- `/ip2`、`/ip3`…：默认网卡上的其余 IPv4
+- 普通 `/ws` 或 `-path` 配置的路径继续使用默认出口
+
+检测方式不依赖 `ip`、`ifconfig` 或发行版网络配置：
+
+1. 通过 `net.Dial("udp4", "1.1.1.1:80")` 让内核按路由表选择默认源地址；
+2. 用 Go 标准库枚举该网卡上的 IPv4，默认地址排第一；
+3. UDP 探测失败时解析 `/proc/net/route` 找默认路由网卡（Alpine 容器同样适用）。
+
+管理页节点操作的“启用出口 IP”开关默认关闭。开启后：
+
+- 节点在下一次 60 秒上报时收到 `egress.enabled=true`；
+- 节点确认后，订阅才会为每个出口生成 `/ip1`、`/ip2`… 节点；
+- 关闭开关后订阅立即停止生成 `/ipN`，节点在下次上报时停止接受这些路径。
+
+示例（5 个地址）：
+
+```text
+/ip1  10.0.0.61   默认出口
+/ip2  10.0.0.139
+/ip3  10.0.0.152
+/ip4  10.0.0.185
+/ip5  10.0.0.208
+```
+
+`GET /<token>/config` 的 `egress` 字段会返回当前检测结果和开关状态。
+出口列表在进程启动时检测；网卡地址变化后需要重启 vless-small。
+指定出口的连接只走 IPv4；目标为 IPv6 字面量时会连接失败，普通 `/ws` 不受影响。
 
 ## 临时隧道（Quick Tunnel）
 

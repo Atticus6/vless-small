@@ -23,7 +23,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "websocket upgrade required", http.StatusUpgradeRequired)
 		return
 	}
-	if s.path != "" && r.URL.Path != s.path {
+	sourceIP, ok := s.sourceIPForPath(r.URL.Path)
+	if !ok {
+		// 形如 /ipN 但不在当前出口列表里：明确 404，避免静默使用默认出口。
+		http.NotFound(w, r)
+		return
+	}
+	if s.path != "" && r.URL.Path != s.path && sourceIP == nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -69,15 +75,36 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer close(stopPing)
 	go pingLoop(ws, stopPing)
 
-	log.Printf("open %s (cmd=%d)", r.RemoteAddr, cmd)
+	egress := "-"
+	if sourceIP != nil {
+		egress = sourceIP.String()
+	}
+	log.Printf("open %s (cmd=%d, path=%s, egress=%s)", r.RemoteAddr, cmd, r.URL.Path, egress)
 	switch cmd {
 	case cmdTCP:
-		s.relayTCP(ws, target, payload)
+		s.relayTCP(ws, target, payload, sourceIP)
 	case cmdUDP:
-		s.relayUDP(ws, target, payload)
+		s.relayUDP(ws, target, payload, sourceIP)
 	default:
 		log.Printf("unsupported command %d from %s", cmd, r.RemoteAddr)
 	}
+}
+
+// dialOutbound 建立到目标的 TCP/UDP 连接，可按需绑定 IPv4 源地址。
+//
+// 绑定源地址时使用 tcp4/udp4，确保内核不会因为目标解析出 IPv6 而绕开
+// 指定出口；普通连接保持 tcp/udp，继续支持 IPv6。
+func dialOutbound(base, target string, sourceIP net.IP) (net.Conn, error) {
+	dialer := net.Dialer{Timeout: dialTimeout}
+	if sourceIP != nil {
+		switch base {
+		case "tcp":
+			dialer.LocalAddr = &net.TCPAddr{IP: sourceIP.To4()}
+		case "udp":
+			dialer.LocalAddr = &net.UDPAddr{IP: sourceIP.To4()}
+		}
+	}
+	return dialer.Dial(dialNetwork(base, sourceIP), target)
 }
 
 // pingLoop 定期发送控制帧; WriteControl 可与数据写并发调用, 无需额外加锁.
@@ -98,10 +125,11 @@ func pingLoop(ws *websocket.Conn, stop <-chan struct{}) {
 }
 
 // relayTCP 双向转发: WebSocket <-> 目标 TCP. 仅本 goroutine 写 WS 数据帧.
-func (s *Server) relayTCP(ws *websocket.Conn, target string, early []byte) {
-	conn, err := net.DialTimeout("tcp", target, dialTimeout)
+// sourceIP 非空时绑定该本地地址作为出站源 IP。
+func (s *Server) relayTCP(ws *websocket.Conn, target string, early []byte, sourceIP net.IP) {
+	conn, err := dialOutbound("tcp", target, sourceIP)
 	if err != nil {
-		log.Printf("dial %s: %v", target, err)
+		log.Printf("dial %s from %s: %v", target, sourceIP, err)
 		return
 	}
 	defer conn.Close()
@@ -154,10 +182,11 @@ func (s *Server) relayTCP(ws *websocket.Conn, target string, early []byte) {
 
 // relayUDP 转发 VLESS UDP 会话.
 // 包格式: [2B 大端长度][payload], 一个 WS 消息里可以拼接多个包.
-func (s *Server) relayUDP(ws *websocket.Conn, target string, early []byte) {
-	conn, err := net.DialTimeout("udp", target, dialTimeout)
+// sourceIP 非空时绑定该本地地址作为出站源 IP。
+func (s *Server) relayUDP(ws *websocket.Conn, target string, early []byte, sourceIP net.IP) {
+	conn, err := dialOutbound("udp", target, sourceIP)
 	if err != nil {
-		log.Printf("dial udp %s: %v", target, err)
+		log.Printf("dial udp %s from %s: %v", target, sourceIP, err)
 		return
 	}
 	defer conn.Close()
