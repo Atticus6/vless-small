@@ -5,7 +5,6 @@
 Dockerfile
 .dockerignore
 README.md
-vercel.json
 vless-small
 vless-small.exe
 *.test

@@ -269,7 +269,7 @@ func TestSyncDevicesReportsEmptyEgress(t *testing.T) {
 	if _, err := syncDevices(
 		NodeConfig{BaseURL: ts.URL, Name: "hk", Token: "secret"},
 		srv, ":8080", "/ws", nil,
-		nodeInfo{runtime: "vercel"},
+		nodeInfo{runtime: "railway"},
 		tunnel.Report{}, cert.Report{},
 	); err != nil {
 		t.Fatalf("syncDevices: %v", err)

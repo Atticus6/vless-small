@@ -14,7 +14,7 @@
 | `internal/app/` | 核心服务：`server.go`（用户表、健康检查）、`websocket.go`、`protocol.go`、`node.go`（CONFIG、上报、设备同步）、`push.go`、`update.go`、`platform.go`、`users.go`、`constants.go`；`egress*.go` 负责出口 IP 检测与 `/ipN` 路径选择，`traffic.go` 负责按设备统计与上报流量 |
 | `internal/tunnel/` | 临时隧道控制器：内嵌官方 cloudflared supervisor，申请 quick tunnel |
 | `internal/cert/` | ACME 自动证书：`cert_common.go`、`cert_impl.go`、`cert_stub.go` |
-| `internal/platform/` | 运行平台识别（local / Vercel / Railway / Northflank 等） |
+| `internal/platform/` | 运行平台识别（local / Railway / Northflank 等） |
 | `version.txt` | 当前版本号，Release workflow 唯一版本来源 |
 | `install.sh` | 一键安装脚本，作为 Release 资产发布 |
 | `uninstall.sh` | 独立卸载脚本，作为 Release 资产发布 |
@@ -185,7 +185,7 @@ docker run -d --restart=always --name vless-small \
 - 只读 rootfs（`--read-only`）无法自更新。
 
 首轮升级：旧版本节点不认识 `update` 字段，需要手动重跑一次安装脚本或更新
-镜像，之后 Web 按钮才会生效。SaaS 自动休眠运行时（Vercel/Railway）不会后台
+镜像，之后 Web 按钮才会生效。Railway 等自动休眠运行时不会后台
 轮询，Web 会拒绝下发。
 
 ## 出口 IP 选择（runtime=local）
@@ -250,7 +250,7 @@ docker run -d --restart=always --name vless-small \
 - 上报成功才清空累计值；某一批失败时回滚该批及后续批次，下一轮重试；
 - 进程收到 SIGTERM 时会尽量 `FlushTraffic` 一次；自更新直接退出，最多丢失
   当前未上报窗口；
-- Vercel/Railway 等自动休眠运行时没有常驻进程，不启动流量上报循环。
+- Railway 等自动休眠运行时没有常驻进程，不启动流量上报循环。
 
 主控不查询设备归属，直接把每条记录写入 Analytics Engine：`blob1` 是设备
 UUID，`blob2` 是节点 id，`double1/2` 是上传/下载字节，时间由 Analytics
@@ -258,7 +258,7 @@ Engine 自动记录。设备或节点已不存在时也照常写入。
 
 ## 临时隧道（Cloudflare Quick Tunnel）
 
-非 Vercel 构建直接内嵌**官方 cloudflared Go 实现**（`github.com/cloudflare/cloudflared`），
+构建直接内嵌**官方 cloudflared Go 实现**（`github.com/cloudflare/cloudflared`），
 调用其 `supervisor`、`connection`、`orchestration` 等包，把 cloudflared 编译进
 当前进程；节点上不需要安装 cloudflared 二进制。当前内嵌版本对应
 **2026.11.1**，连接器上报的 `tunnelBuildVersion` 与之一致；Cloudflare
@@ -276,8 +276,6 @@ Engine 自动记录。设备或节点已不存在时也照常写入。
 - 协议默认 `auto`，由 cloudflared 自动选择 QUIC 或 HTTP/2；可用
   `TUNNEL_PROTOCOL=quic|http2|auto` 固定。
 - QUIC 需要出站 UDP 7844，HTTP/2 需要出站 TCP 7844。
-- Vercel 构建使用 `-tags vercel`，`tunnel_stub.go` 不导入 cloudflared，
-  上报 `tunnel.supported=false`，主控不会下发启用指令。
 - 内嵌 cloudflared 的依赖和二进制体积明显大于自定义实现；只在隧道开启时
   启动 supervisor，关闭后释放其连接和缓冲区。
 
@@ -331,10 +329,9 @@ Environment=GOGC=50
 
 限制：
 
-- 仅 **`runtime=local` 的纯 Linux 非 Docker** 环境；Northflank、Vercel、
+- 仅 **`runtime=local` 的纯 Linux 非 Docker** 环境；Northflank、
   Railway、Render、Fly、Koyeb、Cloudflare、Zeabur 等托管容器/PaaS 运行时
-  都不支持，会在上报中返回 `cert.supported=false`。Vercel 构建
-  （`-tags vercel`）完全剔除证书代码。
+  都不支持，会在上报中返回 `cert.supported=false`。
 - 域名必须解析到该节点，且公网能访问 80/443。
 - 安装脚本生成的 systemd 服务已加入 `CAP_NET_BIND_SERVICE`，服务用户可绑定
   低端口；手动运行需要 root 或同等 capability。
@@ -480,18 +477,18 @@ curl -fsS "http://127.0.0.1:8080/${TOKEN}/config"
 | `version` | 构建时通过 `-ldflags -X main.version` 注入的 Release 版本；本地构建为 `dev` |
 | `os` / `arch` | `runtime.GOOS` 与 Release 资产架构（仅发布 amd64/arm64） |
 | `cert` | 自动证书状态；主控据此写入 `cert_*` 并生成证书节点 |
-| `runtime` | `NODE_RUNTIME` / `RUNTIME`，否则根据 `VERCEL`、`RAILWAY_*`、`RENDER_*`、`FLY_APP_NAME`、`KOYEB_*`、`CF_PAGES*`、`ZEABUR*`、`NF_*` 自动判断 |
+| `runtime` | `NODE_RUNTIME` / `RUNTIME`，否则根据 `RAILWAY_*`、`RENDER_*`、`FLY_APP_NAME`、`KOYEB_*`、`CF_PAGES*`、`ZEABUR*`、`NF_*` 自动判断 |
 | `hosts` | `PUBLIC_HOSTS`（逗号分隔）/ `PUBLIC_HOST`，否则读取平台分配的公网域名；Northflank 使用 `NF_HOSTS` |
 | `ipv4` / `ipv6` | 本机公网 IP 查询；可用 `NODE_IPV4` / `NODE_IPV6` 覆盖 |
 | `countryCode` / `latitude` / `longitude` | 本机 IP 查询结果 |
 
-只采集稳定的公网地址：Vercel 使用 `VERCEL_PROJECT_PRODUCTION_URL`（忽略每次部署变化的 `VERCEL_URL`）；
-Cloudflare Pages 不使用 `CF_PAGES_URL`（单次部署地址），请通过 `PUBLIC_HOST` 手动指定生产域名。
+只采集稳定的公网地址：Cloudflare Pages 不使用 `CF_PAGES_URL`（单次部署地址），
+请通过 `PUBLIC_HOST` 手动指定生产域名。
 
 IP 查询默认请求 `https://ipinfo.io/json`，可用 `IP_LOOKUP_URL` 指向其他服务。
 `name` 和 `token` 中不要包含下划线（`CONFIG` 使用下划线分隔）。
 
-在 **Vercel / Railway** 上不会启动 60 秒后台同步，只在冷启动时同步一次，
+在 **Railway** 上不会启动 60 秒后台同步，只在冷启动时同步一次，
 避免空闲时持续请求让实例无法自动休眠。其他运行环境（包括 Northflank）仍按 60 秒刷新设备列表。
 
 Northflank 会注入 `NF_HOSTS`（可能包含多个逗号分隔的地址），直接读取即可；
@@ -501,8 +498,7 @@ Northflank 会注入 `NF_HOSTS`（可能包含多个逗号分隔的地址），�
 > 包含哪些节点，不会缩小节点端的 UUID 列表，因此授权变化不需要通知每个节点。
 
 新建设备时主控会尝试 `POST <WS_PATH>`（Bearer CONFIG token）把完整设备列表
-推给已上报公网地址的节点，让新 UUID 立即生效；Vercel 运行时是无状态实例，
-主控会跳过（这类节点只在冷启动上报时同步）。节点仍按 60 秒周期拉取全量列表。
+推给已上报公网地址的节点，让新 UUID 立即生效。节点仍按 60 秒周期拉取全量列表。
 反向代理需要允许该 WS 路径上的 POST，推送失败不影响设备创建。
 
 ## 客户端
@@ -517,9 +513,8 @@ vless://<DEVICE_ID>@<HOST>:<PORT>?encryption=none&security=none&type=ws&path=%2F
 
 ## 说明
 
-- 基础依赖只有 `github.com/gorilla/websocket`；非 Vercel 构建额外内嵌
-  官方 `github.com/cloudflare/cloudflared`（临时隧道）及其依赖，Vercel
-  构建使用 `-tags vercel` 剔除隧道实现。
+- 基础依赖只有 `github.com/gorilla/websocket`；额外内嵌
+  官方 `github.com/cloudflare/cloudflared`（临时隧道）及其依赖。
 - 每条连接首条 WS 消息是 VLESS 请求头，响应头为 `[0x00, 0x00]`。
 - 支持 `cmd=1`（TCP）与 `cmd=2`（UDP，`[2B 长度][数据]` 分包）。
 - 服务端每 25s 发一次 WS ping，客户端回 pong 即续期 60s 读超时。

@@ -52,10 +52,8 @@ func detectHosts() []string {
 	}
 
 	// 只使用稳定的公网地址：
-	// - 不用 VERCEL_URL：它是每次部署都会变化的 deployment URL；
-	// - 不用 CF_PAGES_URL：它同样指向单次部署，不是稳定生产域名。
+	// - 不用 CF_PAGES_URL：它指向单次部署，不是稳定生产域名。
 	candidates := []string{
-		os.Getenv("VERCEL_PROJECT_PRODUCTION_URL"),
 		os.Getenv("RAILWAY_PUBLIC_DOMAIN"),
 		os.Getenv("RENDER_EXTERNAL_HOSTNAME"),
 		os.Getenv("RENDER_EXTERNAL_URL"),

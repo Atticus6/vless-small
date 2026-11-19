@@ -585,11 +585,10 @@ func TestSyncDevices(t *testing.T) {
 	}
 }
 
-func TestDetectRuntimeAndHosts(t *testing.T) {
+func TestDetectRailwayAndHosts(t *testing.T) {
 	for _, key := range []string{
 		"NODE_RUNTIME", "RUNTIME",
 		"PUBLIC_HOST", "PUBLIC_HOSTS",
-		"VERCEL", "VERCEL_URL", "VERCEL_PROJECT_PRODUCTION_URL",
 		"RAILWAY_ENVIRONMENT", "RAILWAY_PUBLIC_DOMAIN",
 		"RENDER", "RENDER_EXTERNAL_URL", "RENDER_EXTERNAL_HOSTNAME",
 		"FLY_APP_NAME",
@@ -599,21 +598,20 @@ func TestDetectRuntimeAndHosts(t *testing.T) {
 		"NF_HOSTS", "NF_PLAN_ID",
 		"NORTHFLANK", "NORTHFLANK_SERVICE_ID", "NORTHFLANK_PROJECT_ID",
 		"NORTHFLANK_PUBLIC_URL", "NORTHFLANK_SERVICE_URL", "SERVICE_URL",
+		"PUBLIC_URL",
 	} {
 		t.Setenv(key, "")
 	}
 
-	t.Setenv("VERCEL", "1")
-	t.Setenv("VERCEL_PROJECT_PRODUCTION_URL", "demo.vercel.app")
-	// 每次部署变化的 VERCEL_URL 不应被当作稳定公网地址。
-	t.Setenv("VERCEL_URL", "preview-abc.vercel.app")
+	t.Setenv("RAILWAY_ENVIRONMENT", "production")
+	t.Setenv("RAILWAY_PUBLIC_DOMAIN", "vless.up.railway.app")
 
-	if got := detectRuntime(); got != "vercel" {
-		t.Fatalf("runtime = %q, want vercel", got)
+	if got := detectRuntime(); got != "railway" {
+		t.Fatalf("runtime = %q, want railway", got)
 	}
 	hosts := detectHosts()
-	if len(hosts) != 1 || hosts[0] != "demo.vercel.app" {
-		t.Fatalf("hosts = %v, want [demo.vercel.app]", hosts)
+	if len(hosts) != 1 || hosts[0] != "vless.up.railway.app" {
+		t.Fatalf("hosts = %v, want [vless.up.railway.app]", hosts)
 	}
 }
 
@@ -621,7 +619,6 @@ func TestDetectNorthflank(t *testing.T) {
 	for _, key := range []string{
 		"NODE_RUNTIME", "RUNTIME",
 		"PUBLIC_HOST", "PUBLIC_HOSTS",
-		"VERCEL", "VERCEL_URL", "VERCEL_PROJECT_PRODUCTION_URL",
 		"RAILWAY_ENVIRONMENT", "RAILWAY_PUBLIC_DOMAIN",
 		"RENDER", "RENDER_EXTERNAL_URL", "RENDER_EXTERNAL_HOSTNAME",
 		"FLY_APP_NAME",
@@ -648,7 +645,7 @@ func TestDetectNorthflank(t *testing.T) {
 }
 
 func TestIsAutoSleepRuntime(t *testing.T) {
-	for _, runtime := range []string{"vercel", "railway"} {
+	for _, runtime := range []string{"railway"} {
 		if !isAutoSleepRuntime(runtime) {
 			t.Fatalf("%s should disable background sync", runtime)
 		}

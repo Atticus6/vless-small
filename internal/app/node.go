@@ -189,7 +189,7 @@ func reportCertState(cfg NodeConfig, status cert.Report) {
 
 // StartNodeSync 在配置了 CONFIG 时执行首次上报，并按平台决定是否后台轮询.
 //
-// Vercel / Railway 无请求时会自动休眠；后台定时同步会产生持续请求，让实例
+// Railway 无请求时会自动休眠；后台定时同步会产生持续请求，让实例
 // 无法休眠，因此这两个平台只在冷启动时同步一次。其余平台（含 Northflank
 // 这类常驻容器）保持 60 秒轮询，以便及时收到设备、隧道和证书指令。
 func StartNodeSync(

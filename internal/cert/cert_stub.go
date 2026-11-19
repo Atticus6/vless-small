@@ -1,10 +1,10 @@
-//go:build !linux || vercel
+//go:build !linux
 
 package cert
 
 import "net/http"
 
-// 非 Linux 或 Vercel 构建不包含 ACME/证书代码。
+// 非 Linux 构建不包含 ACME/证书代码。
 func New(http.Handler) Controller {
 	return certStub{}
 }

@@ -48,7 +48,6 @@ func TestCertRuntimeAllowed(t *testing.T) {
 	for _, runtime := range []string{
 		"northflank",
 		"NORTHFLANK",
-		"vercel",
 		"railway",
 		"render",
 		"fly",

@@ -1,4 +1,4 @@
-//go:build linux && !vercel
+//go:build linux
 
 package cert
 

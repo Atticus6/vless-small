@@ -19,7 +19,7 @@ type Report struct {
 	Error     string `json:"error,omitempty"`
 }
 
-// Controller 抽象 ACME 证书生命周期；Vercel/非 Linux 构建使用空实现。
+// Controller 抽象 ACME 证书生命周期；非 Linux 构建使用空实现。
 type Controller interface {
 	Sync(domain string)
 	Status() Report
@@ -31,7 +31,7 @@ type Controller interface {
 // certRuntimeAllowed 判断平台运行时是否允许直接绑定 80/443。
 //
 // 只有显式识别为 local 的纯 Linux 环境允许；所有托管容器/PaaS
-// （Northflank、Vercel、Railway 等）即使是常驻容器也不启用 ACME。
+// （Northflank、Railway 等）即使是常驻容器也不启用 ACME。
 func certRuntimeAllowed(runtime string) bool {
 	return strings.ToLower(strings.TrimSpace(runtime)) == "local"
 }

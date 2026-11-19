@@ -1,5 +1,3 @@
-//go:build !vercel
-
 package tunnel
 
 import (
@@ -169,8 +167,7 @@ func envMiB(key string) (uint64, bool) {
 	return uint64(value) << 20, true
 }
 
-// Vercel 之外的构建把 cloudflared 作为 Go 依赖直接嵌入进程，不需要在节点上
-// 单独安装 cloudflared 二进制。Vercel 构建使用 tunnel_stub.go。
+// cloudflared 作为 Go 依赖直接嵌入进程，不需要在节点上单独安装二进制。
 func Supported() bool { return true }
 
 func New(listen string) Controller {

@@ -16,13 +16,11 @@ import (
 // 无法匹配任何平台时返回 "local"。
 func DetectRuntime() string {
 	if v := firstNonEmpty(os.Getenv("NODE_RUNTIME"), os.Getenv("RUNTIME")); v != "" {
-		// 覆盖值也统一小写，避免 RUNTIME=LOCAL/Vercel 让后续精确匹配失效。
+		// 覆盖值也统一小写，避免 RUNTIME=LOCAL/Railway 让后续精确匹配失效。
 		return strings.ToLower(v)
 	}
 
 	switch {
-	case envSet("VERCEL") || envSet("VERCEL_URL"):
-		return "vercel"
 	case envSet("RAILWAY_ENVIRONMENT") || envSet("RAILWAY_PUBLIC_DOMAIN"):
 		return "railway"
 	case envSet("RENDER") || envSet("RENDER_EXTERNAL_URL"):
@@ -47,7 +45,7 @@ func DetectRuntime() string {
 // 这类平台不能跑后台轮询，否则持续请求会阻止实例休眠；Northflank 等
 // 常驻容器平台不受影响。
 func IsAutoSleepRuntime(runtime string) bool {
-	return runtime == "vercel" || runtime == "railway"
+	return runtime == "railway"
 }
 
 func firstNonEmpty(values ...string) string {

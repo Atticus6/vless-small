@@ -17,15 +17,15 @@ type Signal struct {
 
 // Report 是节点临时隧道状态。
 //
-// Supported 由构建标签决定：Vercel 构建为 false；URL 是 Cloudflare 分配的
-// *.trycloudflare.com 地址，不可用时为空。
+// Supported 当前构建固定为 true，保留字段用于兼容旧主控；URL 是
+// Cloudflare 分配的 *.trycloudflare.com 地址，不可用时为空。
 type Report struct {
 	Supported bool   `json:"supported"`
 	URL       string `json:"url,omitempty"`
 	Error     string `json:"error,omitempty"`
 }
 
-// Controller 抽象临时隧道生命周期，Vercel 构建使用空实现。
+// Controller 抽象临时隧道生命周期。
 //
 // Sync 必须幂等：上报循环每 60 秒调用一次，只在开关变化时启动/停止；
 // 启动失败时保留错误，后续 Sync 会重试。

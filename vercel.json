@@ -1,9 +1,0 @@
-{
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": "go",
-  "buildCommand": "go build -tags vercel -trimpath -ldflags=\"-s -w\" .",
-  "fluid": false,
-  "regions": [
-    "hkg1"
-  ]
-}

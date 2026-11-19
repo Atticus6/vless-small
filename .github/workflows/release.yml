@@ -11,8 +11,8 @@ on:
     # 监听所有分支的推送；tag 推送不会重复触发。
     branches:
       - "**"
-    # 只有会影响二进制或 Release 资产的改动才构建。Dockerfile、vercel.json、
-    # .gitignore、README 等由各自平台/文档流程处理，不再触发发布。
+    # 只有会影响二进制或 Release 资产的改动才构建。Dockerfile、.gitignore、
+    # README 等由各自平台/文档流程处理，不再触发发布。
     paths:
       - "**/*.go"
       - "go.mod"

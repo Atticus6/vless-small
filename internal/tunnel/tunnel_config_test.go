@@ -1,5 +1,3 @@
-//go:build !vercel
-
 package tunnel
 
 import "testing"
