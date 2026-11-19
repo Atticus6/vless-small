@@ -17,9 +17,8 @@ type config struct {
 
 // parseFlags 读取命令行参数与环境变量，并规范化路径.
 //
-// 使用独立的 FlagSet：cloudflared 依赖的 CoreDNS 会在 init 时向全局
-// flag.CommandLine 注册 version/conf 等参数，复用全局集合会触发
-// "flag redefined" panic。
+// 使用独立的 FlagSet：依赖库可能在 init 时向全局 flag.CommandLine 注册
+// 参数，复用全局集合容易触发 "flag redefined" panic，也不利于测试重复解析。
 func parseFlags() config {
 	defaultListen := ":8080"
 	if port := os.Getenv("PORT"); port != "" {

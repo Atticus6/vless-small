@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// TestParseFlagsTwice 回归测试：cloudflared 依赖的 CoreDNS 会向全局
-// flag.CommandLine 注册 version，解析必须使用独立 FlagSet 且可重复调用。
+// TestParseFlagsTwice 回归测试：解析必须使用独立 FlagSet 且可重复调用，
+// 不能被依赖库注册到全局 flag.CommandLine 的参数影响。
 func TestParseFlagsTwice(t *testing.T) {
 	originalArgs := os.Args
 	defer func() { os.Args = originalArgs }()
