@@ -12,8 +12,7 @@
 | `main.go` | 组装 `app`/`tunnel`/`cert`，启动 HTTP 服务与优雅退出 |
 | `config.go` | 命令行/环境变量解析、路径规范化 |
 | `internal/app/` | 核心服务：`server.go`（用户表、健康检查）、`websocket.go`、`protocol.go`、`node.go`（CONFIG、上报、设备同步）、`push.go`、`update.go`、`platform.go`、`users.go`、`constants.go`；`egress*.go` 负责出口 IP 检测与 `/ipN` 路径选择，`traffic.go` 负责按设备统计与上报流量 |
-| `internal/quicktunnel/` | 纯 Go Quick Tunnel 客户端：Cap'n Proto RPC、QUIC 边缘连接、HTTP/WebSocket 转发 |
-| `internal/tunnel/` | 临时隧道控制器：`tunnel_common.go`、`tunnel_impl.go`、`tunnel_stub.go` |
+| `internal/tunnel/` | 临时隧道控制器：内嵌官方 cloudflared supervisor，申请并运行 Quick Tunnel |
 | `internal/cert/` | ACME 自动证书：`cert_common.go`、`cert_impl.go`、`cert_stub.go` |
 | `internal/platform/` | 运行平台识别（local / Vercel / Railway / Northflank 等） |
 | `version.txt` | 当前版本号，Release workflow 唯一版本来源 |
@@ -146,11 +145,11 @@ curl -fsSL -H "Authorization: Bearer <node token>" \
 ```bash
 go test ./...
 
-# 可选：真实 Quick Tunnel 端到端测试（申请临时隧道并验证 HTTP/WebSocket）
-LIVE_TUNNEL=1 go test ./internal/quicktunnel -run TestLiveTunnelEndToEnd -v -timeout 240s
+# 可选：真实 Quick Tunnel 集成测试（会向 Cloudflare 申请临时隧道）
+TUNNEL_INTEGRATION=1 go test ./internal/tunnel -run TestQuickTunnelProvisioning -v -timeout 240s
 ```
 
-真实联调测试需要出站 UDP 7844，并会在公网创建一条临时隧道（测试结束后关闭）。
+真实联调测试需要出站 UDP 7844（QUIC）或 TCP 7844（HTTP/2），并会在公网创建一条临时隧道（测试结束后关闭）。
 
 ## 自动更新（Web 下发）
 
@@ -255,20 +254,11 @@ Engine 自动记录。设备或节点已不存在时也照常写入。
 
 ## 临时隧道（Quick Tunnel）
 
-非 Vercel 构建内置一个纯 Go 的 Quick Tunnel 客户端（`internal/quicktunnel`），
-只依赖 `quic-go` 与 Go 标准库，**不依赖 cloudflared 的源码或二进制**。节点会向
-`https://api.trycloudflare.com/tunnel` 申请临时隧道，然后通过 QUIC 连接
-Cloudflare 边缘并转发请求。
-
-协议实现要点：
-
-- 边缘地址来自 `_v2-origintunneld._tcp.argotunnel.com` 的 SRV 记录（UDP 7844）；
-- TLS SNI 为 `quic.cftunnel.com`，ALPN 为 `argotunnel`；根证书使用
-  Cloudflare 公开的 Origin CA；
-- 控制流是第一条双向 QUIC 流，使用手写的 Cap'n Proto RPC 子集完成
-  `bootstrap` → `registerConnection` → `updateLocalConfiguration`；
-- 数据流以 6 字节魔数 + `01` 版本 + Cap'n Proto `ConnectRequest` 开头，支持
-  HTTP 与 WebSocket（101 之后原样双向转发）。
+非 Vercel 构建直接内嵌**官方 cloudflared Go 实现**（`github.com/cloudflare/cloudflared`），
+调用其 `supervisor`、`connection`、`orchestration` 等包，把 cloudflared 编译进
+当前进程；节点上不需要安装 cloudflared 二进制。节点向
+`https://api.trycloudflare.com/tunnel` 申请临时隧道，再由 cloudflared supervisor
+连接 Cloudflare 边缘并转发 HTTP/WebSocket。
 
 运行时行为：
 
@@ -280,11 +270,43 @@ Cloudflare 边缘并转发请求。
   指标弹框可直接看到。
 - 隧道固定回源到 `http://127.0.0.1:<PORT>`，复用同一个 HTTP handler（健康检查
   与 WebSocket）。
-- 需要出站 UDP 7844；当前实现只走 QUIC，不提供 HTTP/2 回退。
-- Vercel 构建使用 `-tags vercel`，`tunnel_stub.go` 不导入 quic-go，
+- 协议默认 `auto`，由 cloudflared 自动选择 QUIC 或 HTTP/2；可用
+  `TUNNEL_PROTOCOL=quic|http2|auto` 固定。
+- QUIC 需要出站 UDP 7844，HTTP/2 需要出站 TCP 7844。
+- Vercel 构建使用 `-tags vercel`，`tunnel_stub.go` 不导入 cloudflared，
   上报 `tunnel.supported=false`，主控不会下发启用指令。
-- 相比内嵌 cloudflared，`quic-go` 依赖体积小得多，也不需要单独的 cloudflared
-  二进制或其大量间接依赖。
+- 内嵌 cloudflared 的依赖和二进制体积明显大于自定义实现；只在隧道开启时
+  启动 supervisor，关闭后释放其连接和缓冲区。
+
+### 降低 cloudflared 内存占用
+
+内嵌 cloudflared 的运行时内存主要来自 HA 连接、QUIC 流控窗口和 Go 堆。
+本实现默认做了以下收敛：
+
+- `HAConnections = 1`（原 cloudflared 推荐 2–4）；需要冗余时用
+  `TUNNEL_HA_CONNECTIONS=2..4` 调高。
+- QUIC 连接级流控窗口从 30 MiB 降到 **8 MiB**，流级从 6 MiB 降到 **2 MiB**；
+  高带宽场景可用 `TUNNEL_QUIC_CONN_FLOW_MIB` / `TUNNEL_QUIC_STREAM_FLOW_MIB`
+  调大（1–256 MiB）。
+- 内部日志默认 `error`，避免高频日志分配；排查时用
+  `TUNNEL_LOG_LEVEL=info|debug`。
+- 内存敏感环境可设 `TUNNEL_PROTOCOL=http2`，避免 quic-go 的额外缓冲；
+  代价是失去 QUIC 的连接迁移和部分弱网优势。
+- 不需要隧道时在主控关闭开关，supervisor 会退出并释放连接。
+
+还可以用 Go 运行时限制堆上限（Go 1.19+）：
+
+```bash
+# systemd unit
+Environment=GOMEMLIMIT=96MiB
+Environment=GOGC=50
+
+# Docker
+-e GOMEMLIMIT=96MiB -e GOGC=50
+```
+
+`GOMEMLIMIT` 是软上限，超过后会更积极地 GC；`GOGC=50` 降低堆增长，
+两者都会用一些 CPU 换内存。不要设置得低于实际峰值，否则会频繁 GC。
 
 > Quick Tunnel 仅适合临时/个人使用，Cloudflare 不提供可用性保证；生产环境
 > 建议使用带固定域名的命名隧道。
@@ -446,7 +468,7 @@ curl -fsS "http://127.0.0.1:8080/${TOKEN}/config"
 1. 向 `<baseURL>/api/nodes/report` 上报节点信息；
 2. 使用 `Bearer <token>` 认证（`name` + `token` 必须与主控 `vless` 表中的记录一致）；
 3. 接收主控返回的所有设备，把启用设备的 `id` 当作 VLESS UUID 接受连接；
-4. 读取 `tunnel.enabled` 并启动/停止内置 Quick Tunnel 客户端。
+4. 读取 `tunnel.enabled` 并启动/停止内置 cloudflared supervisor。
 
 节点信息由 vless-small 自动收集：
 
@@ -492,9 +514,9 @@ vless://<DEVICE_ID>@<HOST>:<PORT>?encryption=none&security=none&type=ws&path=%2F
 
 ## 说明
 
-- 基础依赖只有 `github.com/gorilla/websocket`；非 Vercel 构建额外包含
-  `github.com/quic-go/quic-go`（Quick Tunnel），Vercel 构建使用
-  `-tags vercel` 剔除该依赖。
+- 基础依赖只有 `github.com/gorilla/websocket`；非 Vercel 构建额外内嵌
+  官方 `github.com/cloudflare/cloudflared`（Quick Tunnel）及其依赖，Vercel
+  构建使用 `-tags vercel` 剔除隧道实现。
 - 每条连接首条 WS 消息是 VLESS 请求头，响应头为 `[0x00, 0x00]`。
 - 支持 `cmd=1`（TCP）与 `cmd=2`（UDP，`[2B 长度][数据]` 分包）。
 - 服务端每 25s 发一次 WS ping，客户端回 pong 即续期 60s 读超时。
