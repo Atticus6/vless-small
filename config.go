@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// config 是命令行/环境变量解析后的启动配置.
+// config 是命令行/环境变量解析后的启动配置. 
 type config struct {
 	listen       string
 	uuidList     string
