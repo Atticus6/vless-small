@@ -60,7 +60,7 @@ func TestControllerSyncIdempotent(t *testing.T) {
 	defer ctl.Close()
 
 	ctl.Sync(Signal{Enabled: true})
-	first := ctl.(*controller).server
+	first := ctl.(*controller).currentServer()
 	if first == nil {
 		t.Fatal("setup: entry did not start")
 	}
@@ -69,7 +69,7 @@ func TestControllerSyncIdempotent(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		ctl.Sync(Signal{Enabled: true})
 	}
-	if ctl.(*controller).server != first {
+	if ctl.(*controller).currentServer() != first {
 		t.Fatal("identical signal restarted the entry")
 	}
 }
@@ -83,13 +83,13 @@ func TestControllerRetryRestarts(t *testing.T) {
 	defer ctl.Close()
 
 	ctl.Sync(Signal{Enabled: true, Retry: 1})
-	first := ctl.(*controller).server
+	first := ctl.(*controller).currentServer()
 	if first == nil {
 		t.Fatal("setup: entry did not start")
 	}
 
 	ctl.Sync(Signal{Enabled: true, Retry: 2})
-	second := ctl.(*controller).server
+	second := ctl.(*controller).currentServer()
 	if second == nil {
 		t.Fatal("retry did not restart the entry")
 	}
@@ -185,22 +185,22 @@ func TestControllerServeExitClearsServer(t *testing.T) {
 	defer ctl.Close()
 
 	ctl.Sync(Signal{Enabled: true})
-	if ctl.(*controller).server == nil {
+	if ctl.(*controller).currentServer() == nil {
 		t.Fatal("setup: entry did not start")
 	}
 
 	// Close 会让 Serve 返回；等异步收尾把 c.server 清掉。
-	srv := ctl.(*controller).server
+	srv := ctl.(*controller).currentServer()
 	_ = srv.Close()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if ctl.(*controller).server == nil {
+		if ctl.(*controller).currentServer() == nil {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if got := ctl.(*controller).server; got != nil {
+	if got := ctl.(*controller).currentServer(); got != nil {
 		t.Fatal("c.server still points to a stopped server")
 	}
 	if ctl.Status().Enabled {
@@ -215,11 +215,11 @@ func TestControllerServeExitDoesNotClearNewServer(t *testing.T) {
 	defer ctl.Close()
 
 	ctl.Sync(Signal{Enabled: true, Retry: 1})
-	old := ctl.(*controller).server
+	old := ctl.(*controller).currentServer()
 
 	// 重试会停掉旧入口并绑定新的；旧 Serve goroutine 稍后才退出。
 	ctl.Sync(Signal{Enabled: true, Retry: 2})
-	newSrv := ctl.(*controller).server
+	newSrv := ctl.(*controller).currentServer()
 	if newSrv == nil || newSrv == old {
 		t.Fatal("setup: retry did not install a new server")
 	}
@@ -228,7 +228,7 @@ func TestControllerServeExitDoesNotClearNewServer(t *testing.T) {
 	_ = old.Close()
 	time.Sleep(100 * time.Millisecond)
 
-	if ctl.(*controller).server != newSrv {
+	if ctl.(*controller).currentServer() != newSrv {
 		t.Fatal("stale Serve goroutine cleared the new server")
 	}
 }
@@ -262,7 +262,7 @@ func TestControllerCloseIgnoresSignals(t *testing.T) {
 	if ctl.Status().Enabled {
 		t.Fatal("Sync restarted the entry after Close")
 	}
-	if ctl.(*controller).server != nil {
+	if ctl.(*controller).currentServer() != nil {
 		t.Fatal("Sync created a server after Close")
 	}
 }

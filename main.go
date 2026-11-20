@@ -110,8 +110,9 @@ func main() {
 			Logf:             log.Printf,
 		}, platform.DetectRuntime())
 		defer hy2Ctl.Close()
-		// 无论入口最终是否起来都要注册状态提供器：主控对缺失的 hy2 字段会
-		// 保留上次结果，不注册就会让订阅一直发布一个连不上的入口。
+		// 无论入口最终是否起来都要注册状态提供器：探测失败时也要显式上报
+		// Enabled=false，让主控把数据库里的旧状态清掉，避免订阅一直发布一个
+		// 连不上的入口。
 		srv.SetHy2StatusProvider(hy2Ctl.Status)
 		// 首次探测放在 Sync 里，信号由上报循环下发；这里先按“希望开启”
 		// 同步一次，避免第一份上报（60 秒内）之前完全没有入口。

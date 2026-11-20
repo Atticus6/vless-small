@@ -149,6 +149,16 @@ func (c *controller) Sync(signal Signal) {
 	}()
 }
 
+// currentServer 在持锁状态下读取当前 server 指针。
+//
+// 供测试轮询使用：Serve goroutine 会在 clearServerIfCurrent 里并发写
+// c.server，无锁读取会触发 go test -race。
+func (c *controller) currentServer() *Server {
+	c.syncMu.Lock()
+	defer c.syncMu.Unlock()
+	return c.server
+}
+
 // clearServerIfCurrent 在 c.server 仍指向 srv 时清空它。
 //
 // Sync 期间可能已经用新 server 替换或调用了 Close，此时不能清掉新的引用；
