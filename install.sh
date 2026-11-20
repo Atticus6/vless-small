@@ -74,13 +74,15 @@ PORT_ARG="${PORT:-}"
 WS_PATH="${WS_PATH:-}"
 PUBLIC_HOSTS="${PUBLIC_HOSTS:-}"
 NODE_RUNTIME="${NODE_RUNTIME:-}"
+TG_SECRET="${TG_SECRET:-}"
+TG_BRIDGE_HOST="${TG_BRIDGE_HOST:-}"
 # auto = root + systemd 时自动注册服务；yes/no 强制开关。
 SERVICE_MODE="${VLESS_SMALL_SERVICE:-auto}"
 UNINSTALL=0
 
 # 有任何配置输入时视为“更新配置”；否则升级时保留已有 env 文件。
 CONFIG_CHANGED=0
-for _value in "$CONFIG" "$UUID" "$PORT_ARG" "$WS_PATH" "$PUBLIC_HOSTS" "$NODE_RUNTIME"; do
+for _value in "$CONFIG" "$UUID" "$PORT_ARG" "$WS_PATH" "$PUBLIC_HOSTS" "$NODE_RUNTIME" "$TG_SECRET" "$TG_BRIDGE_HOST"; do
   if [ -n "$_value" ]; then
     CONFIG_CHANGED=1
   fi
@@ -122,7 +124,7 @@ vless-small 一键安装脚本
   -h, --help            显示帮助
 
 环境变量:
-  CONFIG / UUID / PORT / WS_PATH / PUBLIC_HOSTS / NODE_RUNTIME
+  CONFIG / UUID / PORT / WS_PATH / PUBLIC_HOSTS / NODE_RUNTIME / TG_SECRET / TG_BRIDGE_HOST
   VLESS_SMALL_VERSION / VLESS_SMALL_REPO / VLESS_SMALL_DOWNLOAD_BASE / VLESS_SMALL_SERVICE
   GITHUB_TOKEN          直连私有仓库时使用；Web 代理模式不需要
   INSTALL_DIR           等价于 --install-dir
@@ -204,6 +206,18 @@ while [ "$#" -gt 0 ]; do
     --node-runtime)
       need_value "$@"
       NODE_RUNTIME="$2"
+      CONFIG_CHANGED=1
+      shift 2
+      ;;
+    --tg-secret)
+      need_value "$@"
+      TG_SECRET="$2"
+      CONFIG_CHANGED=1
+      shift 2
+      ;;
+    --tg-bridge-host)
+      need_value "$@"
+      TG_BRIDGE_HOST="$2"
       CONFIG_CHANGED=1
       shift 2
       ;;
@@ -428,6 +442,10 @@ EFFECTIVE_PUBLIC_HOSTS="$PUBLIC_HOSTS"
 [ -n "$EFFECTIVE_PUBLIC_HOSTS" ] || EFFECTIVE_PUBLIC_HOSTS="$(env_value PUBLIC_HOSTS)"
 EFFECTIVE_NODE_RUNTIME="$NODE_RUNTIME"
 [ -n "$EFFECTIVE_NODE_RUNTIME" ] || EFFECTIVE_NODE_RUNTIME="$(env_value NODE_RUNTIME)"
+EFFECTIVE_TG_SECRET="$TG_SECRET"
+[ -n "$EFFECTIVE_TG_SECRET" ] || EFFECTIVE_TG_SECRET="$(env_value TG_SECRET)"
+EFFECTIVE_TG_BRIDGE_HOST="$TG_BRIDGE_HOST"
+[ -n "$EFFECTIVE_TG_BRIDGE_HOST" ] || EFFECTIVE_TG_BRIDGE_HOST="$(env_value TG_BRIDGE_HOST)"
 
 # 服务升级场景允许沿用已有 env；首次安装或手动模式必须提供凭据。
 if [ -z "$EFFECTIVE_CONFIG" ] && [ -z "$EFFECTIVE_UUID" ]; then
@@ -621,6 +639,8 @@ write_env_file() {
     if [ -n "$EFFECTIVE_WS_PATH" ]; then echo "WS_PATH=${EFFECTIVE_WS_PATH}"; fi
     if [ -n "$EFFECTIVE_PUBLIC_HOSTS" ]; then echo "PUBLIC_HOSTS=${EFFECTIVE_PUBLIC_HOSTS}"; fi
     if [ -n "$EFFECTIVE_NODE_RUNTIME" ]; then echo "NODE_RUNTIME=${EFFECTIVE_NODE_RUNTIME}"; fi
+    if [ -n "$EFFECTIVE_TG_SECRET" ]; then echo "TG_SECRET=${EFFECTIVE_TG_SECRET}"; fi
+    if [ -n "$EFFECTIVE_TG_BRIDGE_HOST" ]; then echo "TG_BRIDGE_HOST=${EFFECTIVE_TG_BRIDGE_HOST}"; fi
   } >"$tmp"
 
   install_file "$tmp" "$ENV_FILE" 0600
@@ -911,6 +931,7 @@ if [ -n "${EFFECTIVE_CONFIG}" ] || [ -n "${EFFECTIVE_UUID}" ]; then
   if [ -n "${EFFECTIVE_WS_PATH}" ]; then echo "  export WS_PATH='${EFFECTIVE_WS_PATH}'"; fi
   if [ -n "${EFFECTIVE_PUBLIC_HOSTS}" ]; then echo "  export PUBLIC_HOSTS='${EFFECTIVE_PUBLIC_HOSTS}'"; fi
   if [ -n "${EFFECTIVE_NODE_RUNTIME}" ]; then echo "  export NODE_RUNTIME='${EFFECTIVE_NODE_RUNTIME}'"; fi
+  if [ -n "${EFFECTIVE_TG_SECRET}" ]; then echo "  TG_SECRET + TG_BRIDGE_HOST 已配置（Telegram web-proxy）"; fi
   echo "  ${BIN_PATH}"
 fi
 

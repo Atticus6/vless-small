@@ -22,6 +22,7 @@ import (
 	"github.com/atticus6/vless-small/internal/cert"
 	"github.com/atticus6/vless-small/internal/hy2"
 	"github.com/atticus6/vless-small/internal/platform"
+	"github.com/atticus6/vless-small/internal/tgproxy"
 	"github.com/atticus6/vless-small/internal/tunnel"
 )
 
@@ -86,6 +87,31 @@ func main() {
 	tunnelCtl := tunnel.New(cfg.listen)
 	certCtl := cert.New(handler)
 	srv.SetStatusProviders(tunnelCtl.Status, certCtl.Status)
+	// 可选的 Telegram Desktop 内置 web-proxy：设置 TG_SECRET 时启用。
+	// 非法密钥直接退出，避免带着坏配置运行。
+	if strings.TrimSpace(cfg.tgSecret) != "" {
+		tgSrv, err := tgproxy.New(tgproxy.Config{
+			Secret: cfg.tgSecret,
+			Logf:   log.Printf,
+		})
+		if err != nil {
+			log.Fatalf("telegram web-proxy: %v", err)
+		}
+		if tgSrv != nil {
+			srv.SetTgProxy(tgSrv)
+			log.Printf("telegram web-proxy enabled (bridge + /api/v1/*)")
+			// 配置了对外域名时，直接打印可复制的 bridge URL。
+			if cfg.bridgeHost != "" {
+				bridgeURL, err := tgSrv.BridgeURL(cfg.bridgeHost)
+				if err != nil {
+					log.Printf("telegram bridge URL: %v", err)
+				} else {
+					log.Printf("telegram bridge URL: %s", bridgeURL)
+				}
+			}
+		}
+	}
+
 	defer tunnelCtl.Close()
 	defer certCtl.Close()
 

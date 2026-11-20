@@ -47,6 +47,7 @@ go run . -uuid 14725836-1234-5678-9abc-def012345678 -listen :8080 -path /ws
 | `-hy2-key` / `HY2_KEY` | 空（自签） | Hysteria 2 的 TLS 私钥；留空时自动生成自签证书 |
 | `-hy2-domain` / `HY2_DOMAIN` | `bing.com` | 自签证书的 CN/SAN |
 | `HY2_SKIP_PROBE` | 空 | 设为 `1` 跳过启动时的端口可达性探测 |
+| `-tg-secret` / `TG_SECRET` | 空（不启用） | Telegram Desktop 内置 web-proxy 密钥（32 hex / `dd`+32 hex / UUID）；设置后在 HTTPS 端口提供 bridge 页面与 `/api/v1/*` |
 | `-version` | `dev` | 打印版本；Release 构建通过 `-ldflags -X main.version` 注入 tag |
 
 ## 一键安装
@@ -639,6 +640,57 @@ go build -o vless-small .                              # 裸机/VPS：包含 BBR
 `AmbientCapabilities` / OpenRC 的 ambient capability）。**已有节点需要
 重跑一次 `install.sh` 才会带上这个能力**；之后每次启动都会自动尝试。
 手工用 root 运行二进制时不需要额外配置。
+
+## Telegram Desktop 内置 Web Proxy（可选）
+
+节点可以在同一个 HTTPS 端口上提供 Telegram Desktop 的 **内置 web-proxy**
+协议（tdesktop web-proxy，与 Cloudflare Workers 版 `eooce/Cloudflare-proxy`
+兼容）。开启后 Telegram Desktop 能通过它连到 Telegram WebK，无需传统的
+`tg://proxy` MTProto 入口。
+
+### 启用
+
+```bash
+# TG_SECRET 可以是 32 位 hex、dd/ee/ef 前缀 + 32 hex，或 UUID（会被转成 hex）。
+# 设置后即在 HTTPS 端口挂载 /api/v1/session、/api/v1/ws 与 bridge 页面。
+vless-small -uuid <UUID> -tg-secret '<32-hex-secret>' \
+  -tg-bridge-host node.example.com
+
+# 或用环境变量：
+# TG_SECRET=<secret> TG_BRIDGE_HOST=node.example.com
+```
+
+启动时日志会打印可直接复制的 bridge URL：
+
+```
+telegram bridge URL: https://node.example.com/?bridge=<43 字符签名>
+```
+
+### 在 Telegram Desktop 里使用
+
+1. 设置 → 高级 → 代理设置 → 代理类型选 **内置代理 / MTProto** 的 web 代理模式
+   （Telegram Desktop 的 "Use built-in proxy / web proxy"）。
+2. 把上面打印的 `https://...?bridge=...` URL 填入代理地址。
+3. bridge URL 的签名绑定了域名，域名换了对不上，需要用新域名重新生成。
+
+### 实现说明（`internal/tgproxy/`）
+
+协议分三层：
+
+- **信令**：`POST /api/v1/session` 用 9 字节握手 + HMAC bootstrap token 换取
+  session token；`DELETE` 销毁会话；`GET /api/v1/ws` 升级为一条 WebSocket
+  "lane"（一条 lane = 一条到 TG DC 的流），子协议为
+  `tproxy-lane-v1.<session-token>.<lane-id>`。
+- **lane 帧**：`[type:1][sid:3][len:4][payload]`，type 1=open 2=data 3=close
+  4=window 流控 17=welcome。
+- **TG 数据面**：客户端首个 64 字节是 AES-CTR 加密的伪装头，解密得到
+  mode(dd/ee/ef) 与 DC 编号；服务端重新生成伪装头，连到
+  `wss://kws{N}[-1].web.telegram.org/apiws`，双向做 AES-CTR 重加密与 TG
+  长度分帧。密钥派生（HMAC-SHA256）、token 格式（`exp|nonce|mac`）、AES-CTR
+  的 tail 机制都与 JS 参考实现逐字节对齐（见 `golden_test.go` 的向量）。
+
+注意：bridge 页面假设节点在 **HTTPS** 之后（carrier 用 `wss://` 连回），所以
+`TG_BRIDGE_HOST` 必须是能对外提供 HTTPS 的域名；裸 HTTP 监听只适合本地测试。
 
 ## Hysteria 2 入口（可选）
 

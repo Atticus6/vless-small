@@ -25,6 +25,14 @@ type config struct {
 	hy2Key      string
 	// hy2Domain 是自签证书的 CN/SAN；未配置证书时使用，默认 bing.com。
 	hy2Domain string
+
+	// Telegram Desktop 内置 web-proxy。
+	//
+	// TG_SECRET 是 32 hex（可带 dd/ee/ef 前缀）或 UUID 形式的密钥；为空表示
+	// 不启用。启用后节点在 HTTPS 端口上提供 /api/v1/session、/api/v1/ws 和
+	// ?bridge= 签名页面，Telegram Desktop 通过它连到 TG WebK。
+	tgSecret   string
+	bridgeHost string // 非空时启动后打印 bridge URL
 }
 
 // hy2Port 是 Hysteria 2 入口固定的 UDP 端口。
@@ -54,6 +62,8 @@ func parseFlags() config {
 	hy2Cert := flags.String("hy2-cert", os.Getenv("HY2_CERT"), "Hysteria 2 TLS certificate file (empty = self-signed)")
 	hy2Key := flags.String("hy2-key", os.Getenv("HY2_KEY"), "Hysteria 2 TLS key file (empty = self-signed)")
 	hy2Domain := flags.String("hy2-domain", os.Getenv("HY2_DOMAIN"), "Hysteria 2 self-signed certificate CN/SAN (default bing.com)")
+	tgSecret := flags.String("tg-secret", os.Getenv("TG_SECRET"), "Telegram web-proxy secret (empty = disabled)")
+	bridgeHost := flags.String("tg-bridge-host", os.Getenv("TG_BRIDGE_HOST"), "public HTTPS host to print the Telegram bridge URL for")
 	_ = flags.Parse(os.Args[1:])
 
 	wsPath := strings.TrimSpace(*path)
@@ -72,5 +82,7 @@ func parseFlags() config {
 		hy2Cert:      strings.TrimSpace(*hy2Cert),
 		hy2Key:       strings.TrimSpace(*hy2Key),
 		hy2Domain:    strings.TrimSpace(*hy2Domain),
+		tgSecret:     strings.TrimSpace(*tgSecret),
+		bridgeHost:   strings.TrimSpace(*bridgeHost),
 	}
 }

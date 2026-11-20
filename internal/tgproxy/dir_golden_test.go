@@ -1,0 +1,7 @@
+package tgproxy
+
+// Code generated from JS reference; DO NOT EDIT.
+var dirGolden = struct{ Head, SKey, Plain, ClientToServer, ServerToClient string }{
+	Head: "0714212e3b4855626f7c8996a3b0bdcad7e4f1fe0b1825323f4c596673808d9aa7b4c1cedbe8f5020f1c293643505d6a7784919eabb8c5d2efefefef02002d3a", SKey: "abababababababababababababababab", Plain: "01060b10151a1f24292e33383d42474c51565b60656a6f74797e83888d92979ca1a6abb0b5babfc4c9ced3d8dde2e7ecf1f6fb00050a0f14191e23282d32373c",
+	ClientToServer: "de50f507af8156dc68ea54c311477aa03e82b92f0d33091c5d846f7ff6ddba7f8bd031cbc655ce309bf19d39b5f28ebe48e98dba08b0dfea2645e7f31ff55fe7", ServerToClient: "b4df0d5dfa919749943473e1e60c116781f886a805c3b7828d3aa479ce3532548f57125e8ec389ea78eaba853132ef4d542a35c861d058752f5aa60ffe4939ac",
+}

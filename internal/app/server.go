@@ -16,6 +16,7 @@ import (
 
 	"github.com/atticus6/vless-small/internal/cert"
 	"github.com/atticus6/vless-small/internal/hy2"
+	"github.com/atticus6/vless-small/internal/tgproxy"
 	"github.com/atticus6/vless-small/internal/tunnel"
 	"github.com/gorilla/websocket"
 )
@@ -55,6 +56,8 @@ type Server struct {
 	// hy2Status 由 main 注入；未配置 Hysteria 2 入口时保持 nil，上报里
 	// 不出现该字段，主控按“节点不支持”处理。
 	hy2Status func() hy2.Report
+	// tgproxy 是可用的 Telegram web-proxy 服务端；nil 表示未启用。
+	tgProxy *tgproxy.Server
 
 	// egress 是启动时检测到的本地出口地址，WS 路径 /ipN 通过它选择源 IP。
 	// 为空表示当前环境不启用按路径选择出口。
@@ -226,6 +229,11 @@ func (s *Server) SetHy2StatusProvider(status func() hy2.Report) {
 	s.hy2Status = status
 }
 
+// SetTgProxy 注入 Telegram web-proxy 服务端；未配置 TG_SECRET 时不调用。
+func (s *Server) SetTgProxy(srv *tgproxy.Server) {
+	s.tgProxy = srv
+}
+
 // hy2Report 返回当前 Hysteria 2 入口状态；未配置时返回 nil。
 func (s *Server) hy2Report() *hy2.Report {
 	if s.hy2Status == nil {
@@ -332,6 +340,11 @@ func (s *Server) activeUUIDList() []activeUUID {
 
 // HandleHTTP 处理 WebSocket 请求；POST WS 路径也用于主控设备推送.
 func (s *Server) HandleHTTP(w http.ResponseWriter, r *http.Request) {
+	// Telegram web-proxy 的 HTTP 信令与 bridge 页面优先处理（它们占用
+	// /api/v1/* 与带 ?bridge= 签名的根路径）。
+	if s.tgProxy != nil && s.tgProxy.Handle(w, r) {
+		return
+	}
 	if s.handleDevicePush(w, r) {
 		return
 	}
