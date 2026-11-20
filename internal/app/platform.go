@@ -222,3 +222,18 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+// PublicIPv4 返回本机公网 IPv4；NODE_IPV4 显式覆盖优先。
+//
+// 供其他协议入口（如 Hysteria 2 的端口可达性探测）复用同一套 IP 查询逻辑，
+// 避免重复实现或把整个 nodeInfo 暴露出去。查询失败时返回空字符串。
+func PublicIPv4() string {
+	if v := strings.TrimSpace(os.Getenv("NODE_IPV4")); v != "" {
+		return v
+	}
+	info, err := lookupIPInfo()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(info.ipv4)
+}

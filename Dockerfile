@@ -10,6 +10,7 @@ ARG TARGETVARIANT
 ARG VERSION=dev
 # 临时隧道实现：默认构建纯 Go 版本；传 cloudflared 改为内嵌官方 cloudflared。
 # 例：docker build --build-arg BUILD_TAGS=cloudflared -t vless-small:cloudflared .
+# 容器里始终追加 nobbr：镜像不应修改宿主机内核参数，BBR 代码整段不编进镜像。
 ARG BUILD_TAGS=
 
 WORKDIR /src
@@ -19,8 +20,12 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+# 容器构建固定附加 nobbr 标签：BBR 调优只对裸机/VPS 有意义，镜像里既没有
+# 权限也不该改宿主机 sysctl，因此把实现整体剔除。
 RUN set -eu; \
     export CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH"; \
+    tags="nobbr"; \
+    if [ -n "$BUILD_TAGS" ]; then tags="$BUILD_TAGS,nobbr"; fi; \
     if [ "$TARGETARCH" = "arm" ]; then \
         case "$TARGETVARIANT" in \
             v6) export GOARM=6 ;; \
@@ -28,7 +33,7 @@ RUN set -eu; \
             *) echo "unsupported ARM variant: $TARGETVARIANT" >&2; exit 1 ;; \
         esac; \
     fi; \
-    go build -tags "$BUILD_TAGS" -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/vless-small .
+    go build -tags "$tags" -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/vless-small .
 
 # 运行阶段使用 Alpine; 全程无 RUN, 多架构构建不需要 QEMU.
 FROM alpine:latest

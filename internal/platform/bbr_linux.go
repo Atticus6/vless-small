@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux && !nobbr
 
 package platform
 
@@ -18,8 +18,11 @@ const (
 
 // TryEnableBBR 在纯 Linux（非容器）环境尽力把 TCP 拥塞控制切到 BBR。
 //
-// 只在本机运行（DetectRuntime()=="local"）且未检测到容器时尝试。容器里的
-// /proc/sys 通常属于宿主机或独立的 netns，应用不应擅自修改内核参数。
+// 三层过滤，任何一层不满足都直接跳过：
+//  1. 编译期：`-tags nobbr` 会把这个文件整体排除（Docker 镜像默认如此）；
+//  2. 运行时：只有 DetectRuntime()=="local" 才尝试，PaaS/托管容器跳过；
+//  3. 运行时：检测到容器标记（Docker/Podman/K8s/LXC）也跳过——容器里的
+//     /proc/sys 通常属于宿主机或独立 netns，应用不应擅自修改内核参数。
 //
 // 失败只记日志：内核没有 tcp_bbr、缺少 CAP_NET_ADMIN、modprobe 不可用
 // 都不影响代理本身启动。BBR 对高延迟/有丢包链路的吞吐提升明显，因此值得

@@ -1,8 +1,9 @@
-//go:build !linux
+//go:build !linux || nobbr
 
 package platform
 
-// TryEnableBBR 在非 Linux 平台为空操作。
+// TryEnableBBR 在非 Linux 平台或被 `-tags nobbr` 剔除时为空操作。
 //
-// BBR 是 Linux 内核的 TCP 拥塞控制算法；其他系统没有对应的运行时可调项。
+// BBR 是 Linux 内核的 TCP 拥塞控制算法；Docker 镜像用 `-tags nobbr` 构建，
+// 容器里既没有权限也不该修改宿主机内核参数，因此整段实现不编进镜像。
 func TryEnableBBR() {}

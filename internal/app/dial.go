@@ -513,6 +513,14 @@ func dialOutbound(ctx context.Context, base, target string, sourceIP net.IP) (ne
 	return defaultOutboundDialer.connect(ctx, base, target, sourceIP)
 }
 
+// DialOutbound 用进程级 DNS 缓存和并行拨号建立出站连接。
+//
+// 供 Hysteria 等其他协议入口复用同一套解析/拨号逻辑；sourceIP 为空表示
+// 使用默认出口。
+func DialOutbound(ctx context.Context, network, target string) (net.Conn, error) {
+	return dialOutbound(ctx, network, target, nil)
+}
+
 // connect 是 dialOutbound 的实现主体。
 func (d *outboundDialer) connect(ctx context.Context, base, target string, sourceIP net.IP) (net.Conn, error) {
 	// 保留调用方的 context 用于区分“谁超时”：内部的 dialTimeout 预算耗尽

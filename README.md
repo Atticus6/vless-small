@@ -14,6 +14,7 @@
 | `internal/app/` | 核心服务：`server.go`（用户表、健康检查）、`websocket.go`、`protocol.go`、`node.go`（CONFIG、上报、设备同步）、`push.go`、`update.go`、`platform.go`、`users.go`、`constants.go`；`egress*.go` 负责出口 IP 检测与 `/ipN` 路径选择，`traffic.go` 负责按设备统计与上报流量 |
 | `internal/tunnel/` | 临时隧道控制器：默认使用 `internal/quicktunnel` 纯 Go 实现；`-tags cloudflared` 时内嵌官方 cloudflared supervisor |
 | `internal/quicktunnel/` | 纯 Go 临时隧道客户端：申请、QUIC 边缘连接、Cap'n Proto RPC 与 HTTP/WS 转发（默认构建使用） |
+| `internal/hy2/` | 最小 Hysteria 2 服务端：HTTP/3 认证、`0x401` TCP 流、QUIC datagram UDP 中继 |
 | `internal/cert/` | ACME 自动证书：`cert_common.go`、`cert_impl.go`、`cert_stub.go` |
 | `internal/platform/` | 运行平台识别（local / Railway / Northflank 等） |
 | `version.txt` | 当前版本号，Release workflow 唯一版本来源 |
@@ -40,6 +41,12 @@ go run . -uuid 14725836-1234-5678-9abc-def012345678 -listen :8080 -path /ws
 | `-uuid` / `UUID` | — | 逗号分隔的静态 UUID；设置 `CONFIG` 时可选 |
 | `-path` / `WS_PATH` | 空（任意路径） | 只接受指定 WS 路径，如 `/ws` |
 | `-config` / `CONFIG` | — | `<baseURL>_<name>_<token>`，用于向主控上报并同步设备 |
+| `-hy2-listen` / `HY2_LISTEN` | 空（不启动） | Hysteria 2 的 UDP 监听地址，如 `:8443` |
+| `-hy2-password` / `HY2_PASSWORD` | — | Hysteria 2 认证密码，启用时必填 |
+| `-hy2-cert` / `HY2_CERT` | 空（自签） | Hysteria 2 的 TLS 证书；留空时自动生成自签证书 |
+| `-hy2-key` / `HY2_KEY` | 空（自签） | Hysteria 2 的 TLS 私钥；留空时自动生成自签证书 |
+| `-hy2-domain` / `HY2_DOMAIN` | `bing.com` | 自签证书的 CN/SAN |
+| `HY2_SKIP_PROBE` | 空 | 设为 `1` 跳过启动时的端口可达性探测 |
 | `-version` | `dev` | 打印版本；Release 构建通过 `-ldflags -X main.version` 注入 tag |
 
 ## 一键安装
@@ -612,10 +619,91 @@ Linux 纯本机环境（`runtime=local`，且未检测到 Docker/Podman/Kubernet
 - 容器和 PaaS（Railway、Render、Northflank 等）直接跳过——容器内的
   `/proc/sys` 属于宿主机或独立 netns，不应由应用修改。
 
+三层过滤，任何一层不满足都不会动内核：
+
+| 层 | 条件 | 不满足时 |
+| --- | --- | --- |
+| 编译期 | 没有 `nobbr` 构建标签 | 实现整段不编进二进制 |
+| 运行时 | `runtime=local` | 记录 skip 日志 |
+| 运行时 | 未检测到容器标记 | 记录 skip 日志 |
+
+`Dockerfile` 固定追加 `nobbr` 标签，镜像里完全不含 BBR 代码：
+
+```bash
+docker build -t vless-small .                          # 自动 -tags nobbr
+go build -tags nobbr -o vless-small .                  # 手工构建时剔除
+go build -o vless-small .                              # 裸机/VPS：包含 BBR
+```
+
 安装脚本生成的服务已授予 `CAP_NET_ADMIN`（systemd 的
 `AmbientCapabilities` / OpenRC 的 ambient capability）。**已有节点需要
 重跑一次 `install.sh` 才会带上这个能力**；之后每次启动都会自动尝试。
 手工用 root 运行二进制时不需要额外配置。
+
+## Hysteria 2 入口（可选）
+
+除 WebSocket 之外，还可以在同一进程里开一个 **Hysteria 2** 的 QUIC 入口，
+让客户端按网络选择“WS/CDN 模式”或“QUIC 直连模式”：
+
+```bash
+# 自签证书：不传 -hy2-cert/-hy2-key，自动生成 bing.com 的自签证书并缓存
+vless-small -uuid <UUID> -hy2-listen :8443 -hy2-password '<password>'
+
+# 正式证书
+vless-small -uuid <UUID> -hy2-listen :8443 -hy2-password '<password>' \
+  -hy2-cert /path/fullchain.pem -hy2-key /path/privkey.pem
+```
+
+未提供证书时会在二进制同目录的 `.certs/hy2/` 生成并复用一张自签证书
+（CN/SAN 默认 `bing.com`，可用 `-hy2-domain` / `HY2_DOMAIN` 修改），
+客户端需要设置 `tls.insecure: true`。证书 10 年有效，剩余不足 30 天或
+域名变化时自动重新生成。
+
+客户端配置（官方 Hysteria 客户端）：
+
+```yaml
+server: node.example.com:8443
+auth: <password>
+tls:
+  sni: node.example.com
+socks5:
+  listen: 127.0.0.1:1080
+```
+
+实现范围（`internal/hy2/`）：
+
+- HTTP/3 认证：`POST /auth` + `Hysteria-Auth`，成功返回 `233 HyOK`；
+  认证失败返回 404，表现得像普通 Web 服务；
+- TCP：QUIC 双向流 + `0x401` 帧 + 地址/padding，出站复用
+  `app.DialOutbound`（同一套 DNS 缓存与并行拨号）；
+- UDP：QUIC unreliable datagram，含 SessionID 映射、分片重组、空闲回收；
+- 拥塞控制由客户端决定：认证响应返回 `Hysteria-CC-RX: auto`。
+
+**未实现**：Brutal 拥塞控制、Salamander 混淆、masquerade、ACL、带宽限速。
+需要这些特性时请直接用官方 Hysteria 服务端。
+
+### 启动时的端口可达性探测
+
+Hysteria 走 UDP，TCP 连通性测试对它没有意义。启动时会自动获取本机公网
+IP，再通过 STUN 拿出口 NAT 映射地址，只有**映射端口与监听端口一致**才真正
+启动 hy2 入口：
+
+- 映射一致 → `hysteria2: port reachable, ...`，正常监听；
+- 端口被 NAT 改写、只放行 443、CGNAT、或本机出站 UDP 不通 →
+  `hysteria2: skip, ...`，节点只保留 WS 入口，避免客户端连上一个永远
+  打不开的地址；
+- 监听地址是回环、公网 IP 未知或不是公网地址 → 直接跳过，不发探测包。
+
+探测最多等 3 秒（两个 STUN 服务器），整体上限 8 秒，失败不影响 WS 启动。
+确认端口实际可达但探测被防火墙干扰时，用 `HY2_SKIP_PROBE=1` 跳过探测。
+
+注意：
+
+- 需要公网 **UDP** 入口和有效 TLS 证书（自签证书只能配客户端
+  `tls.insecure` 本地测试）；
+- 不能放在 Cloudflare 代理后面——CDN 会终止 QUIC；
+- 与 WS 入口共享同一份 UUID 用户表，但 Hysteria 客户端用密码认证，
+  两者是独立的认证体系。
 
 ## 说明
 

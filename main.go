@@ -13,11 +13,13 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/atticus6/vless-small/internal/app"
 	"github.com/atticus6/vless-small/internal/cert"
+	"github.com/atticus6/vless-small/internal/hy2"
 	"github.com/atticus6/vless-small/internal/platform"
 	"github.com/atticus6/vless-small/internal/tunnel"
 )
@@ -86,6 +88,25 @@ func main() {
 	defer tunnelCtl.Close()
 	defer certCtl.Close()
 
+	// 可选的 Hysteria 2 入口：UDP/QUIC 直连节点，不经过 CDN。
+	// 只有显式设置 HY2_LISTEN 才启动；配置错误直接退出，避免带着坏配置跑。
+	var hy2Srv *hy2.Server
+	if cfg.hy2Listen != "" {
+		hy2Srv, err = startHysteria2(cfg, nodeCfg)
+		if err != nil {
+			log.Fatalf("hysteria2: %v", err)
+		}
+		if hy2Srv != nil {
+			defer hy2Srv.Close()
+			go func() {
+				log.Printf("hysteria2 listening on %s", hy2Srv.Addr())
+				if err := hy2Srv.Serve(); err != nil {
+					log.Printf("hysteria2: %v", err)
+				}
+			}()
+		}
+	}
+
 	app.StartNodeSync(cfg.listen, cfg.wsPath, nodeCfg, srv, users, tunnelCtl, certCtl)
 
 	httpServer := &http.Server{
@@ -101,6 +122,10 @@ func main() {
 	go func() {
 		defer close(shutdownDone)
 		<-ctx.Done()
+		if hy2Srv != nil {
+			// 先停止接受新的 QUIC 连接，再排空 WS 会话。
+			hy2Srv.Close()
+		}
 		// 先关证书的 80/443 监听：它由 certCtl 独立持有，httpServer.Shutdown
 		// 管不到。不先关的话，排空期间仍能建立新的 HTTPS WebSocket 会话，
 		// 退出前永远等不到 active 归零。
@@ -123,6 +148,54 @@ func main() {
 		log.Fatal(err)
 	}
 	<-shutdownDone
+}
+
+// startHysteria2 探测端口可达性后启动 Hysteria 2 入口。
+//
+// Hysteria 走 UDP，TCP 连通性测试对它没有意义；这里用 STUN 拿公网映射
+// 地址，只有映射端口与监听端口一致（说明没有 NAT 改写、端口确实对外开放）
+// 才启动。否则直接跳过并返回 nil：客户端会连上一个永远打不开的入口，
+// 不如让节点只提供 WS 入口。
+//
+// 显式设置 HY2_SKIP_PROBE=1 可以跳过探测强制启动，适用于探测被防火墙
+// 干扰但实际可达的环境。
+func startHysteria2(cfg config, nodeCfg app.NodeConfig) (*hy2.Server, error) {
+	if !skipHy2Probe() {
+		info := app.PublicIPv4()
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		result := hy2.ProbeReachability(ctx, cfg.hy2Listen, info)
+		cancel()
+
+		if !result.Reachable {
+			log.Printf("hysteria2: skip, %s", result.Reason)
+			return nil, nil
+		}
+		log.Printf("hysteria2: port reachable, %s", result.Reason)
+	}
+
+	srv, err := hy2.New(hy2.Config{
+		Listen:           cfg.hy2Listen,
+		Password:         cfg.hy2Password,
+		CertFile:         cfg.hy2Cert,
+		KeyFile:          cfg.hy2Key,
+		SelfSignedDomain: cfg.hy2Domain,
+		Dial:             app.DialOutbound,
+		Logf:             log.Printf,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return srv, nil
+}
+
+// skipHy2Probe 判断是否跳过端口可达性探测。
+func skipHy2Probe() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("HY2_SKIP_PROBE"))) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
 }
 
 func displayPath(path string) string {
