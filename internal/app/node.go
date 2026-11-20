@@ -76,6 +76,8 @@ type nodeReportResponse struct {
 	Cert *cert.Signal `json:"cert,omitempty"`
 	// Egress 是主控下发的出口选择开关；nil 视为不改变。
 	Egress *egressSignal `json:"egress,omitempty"`
+	// Hy2 是主控下发的 Hysteria 2 开关与重试计数；nil 视为不改变。
+	Hy2 *hy2.Signal `json:"hy2,omitempty"`
 }
 
 // egressSignal 是主控对“按 /ipN 选择出口”的总开关，默认关闭。
@@ -95,6 +97,7 @@ type nodeSyncResult struct {
 	Tunnel *tunnel.Signal
 	Cert   *cert.Signal
 	Egress *egressSignal
+	Hy2    *hy2.Signal
 }
 
 var syncHTTPClient = &http.Client{Timeout: 10 * time.Second}
@@ -209,6 +212,7 @@ func StartNodeSync(
 	static map[[16]byte]struct{},
 	tunnelCtl tunnel.Controller,
 	certCtl cert.Controller,
+	hy2Ctl hy2.Controller,
 ) {
 	if cfg.BaseURL == "" {
 		return
@@ -245,15 +249,7 @@ func StartNodeSync(
 		log.Printf("initial device sync failed: %v", err)
 	}
 	if result != nil {
-		if result.Tunnel != nil {
-			tunnelCtl.Sync(*result.Tunnel)
-		}
-		if result.Cert != nil {
-			certCtl.Sync(result.Cert.Domain)
-		}
-		if result.Egress != nil {
-			srv.SetEgressEnabled(result.Egress.Enabled)
-		}
+		applyNodeSignals(result, srv, tunnelCtl, certCtl, hy2Ctl, info.runtime)
 		handleNodeUpdate(cfg, srv, result.Update)
 	}
 
@@ -263,7 +259,7 @@ func StartNodeSync(
 	}
 	go syncLoop(
 		cfg, srv, listen, path, static, info,
-		tunnelCtl, certCtl, resetTunnel,
+		tunnelCtl, certCtl, hy2Ctl, resetTunnel,
 	)
 	// 流量按设备 UUID 累计，每 30 分钟单独上报；自动休眠运行时没有常驻
 	// 进程，无法可靠累计，跳过。
@@ -278,6 +274,7 @@ func syncLoop(
 	info nodeInfo,
 	tunnelCtl tunnel.Controller,
 	certCtl cert.Controller,
+	hy2Ctl hy2.Controller,
 	resetTunnel *atomic.Bool,
 ) {
 	ticker := time.NewTicker(nodeSyncInterval)
@@ -296,17 +293,46 @@ func syncLoop(
 			continue
 		}
 
-		if result.Tunnel != nil {
-			tunnelCtl.Sync(*result.Tunnel)
-		}
-		if result.Cert != nil {
-			certCtl.Sync(result.Cert.Domain)
-		}
-		if result.Egress != nil {
-			srv.SetEgressEnabled(result.Egress.Enabled)
-		}
+		applyNodeSignals(result, srv, tunnelCtl, certCtl, hy2Ctl, info.runtime)
 		handleNodeUpdate(cfg, srv, result.Update)
 	}
+}
+
+// applyNodeSignals 应用一次上报拿到的所有控制指令。
+//
+// 抽成函数是因为首次上报和后台循环要处理同一组信号；漏掉一处就会出现
+// “只在重启后才生效”的指令。
+//
+// hy2 只在 runtime=local 时下发：托管容器/PaaS 的 UDP 端口通常不可公网
+// 直达，探测也大概率失败，没必要反复尝试。
+func applyNodeSignals(
+	result *nodeSyncResult,
+	srv *Server,
+	tunnelCtl tunnel.Controller,
+	certCtl cert.Controller,
+	hy2Ctl hy2.Controller,
+	runtime string,
+) {
+	if result.Tunnel != nil {
+		tunnelCtl.Sync(*result.Tunnel)
+	}
+	if result.Cert != nil {
+		certCtl.Sync(result.Cert.Domain)
+	}
+	if result.Egress != nil {
+		srv.SetEgressEnabled(result.Egress.Enabled)
+	}
+	if result.Hy2 != nil && hy2Ctl != nil && isLocalRuntime(runtime) {
+		hy2Ctl.Sync(*result.Hy2)
+	}
+}
+
+// isLocalRuntime 判断节点是否运行在纯本机 Linux 环境。
+//
+// 与 certRuntimeAllowed 语义一致：只有显式上报 local 的节点才允许绑定
+// 公网端口（证书用 80/443，hy2 用 UDP 8081）。
+func isLocalRuntime(runtime string) bool {
+	return strings.ToLower(strings.TrimSpace(runtime)) == "local"
 }
 
 // syncDevices 向主控上报节点信息, 把返回的所有启用设备设为可认证 UUID,
@@ -431,5 +457,6 @@ func syncDevicesWithReset(
 		Tunnel: result.Tunnel,
 		Cert:   result.Cert,
 		Egress: result.Egress,
+		Hy2:    result.Hy2,
 	}, nil
 }

@@ -91,33 +91,34 @@ func main() {
 
 	// 可选的 Hysteria 2 入口：UDP/QUIC 直连节点，不经过 CDN。
 	// 设置 HY2_LISTEN（任意非空值）即启用，端口固定 8081——主控订阅按同一
-	// 常量生成，不需要节点上报端口。配置错误直接退出，避免带着坏配置跑。
-	var hy2Srv *hy2.Server
+	// 常量生成，不需要节点上报端口。
+	//
+	// 入口做成可启停的 Controller：端口探测失败时入口会被跳过，主控可以在
+	// 运行期间要求重新探测（见 hy2.Signal.Retry），不必重启进程。
+	var hy2Ctl hy2.Controller
 	if cfg.hy2Listen != "" {
-		hy2Srv, err = startHysteria2(cfg, srv)
-		if err != nil {
-			log.Fatalf("hysteria2: %v", err)
-		}
-		// 无论入口是否起来都要注册状态提供器：主控对缺失的 hy2 字段会保留
-		// 上次结果，探测失败时不注册就会让订阅一直发布一个连不上的入口。
-		if hy2Srv == nil {
-			srv.SetHy2StatusProvider(func() hy2.Report {
-				return hy2.Report{Enabled: false}
-			})
-		} else {
-			defer hy2Srv.Close()
-			// 上报循环据此告诉主控要不要在订阅里生成 hysteria2 节点。
-			srv.SetHy2StatusProvider(hy2Srv.Status)
-			go func() {
-				log.Printf("hysteria2 listening on %s", hy2Srv.Addr())
-				if err := hy2Srv.Serve(); err != nil {
-					log.Printf("hysteria2: %v", err)
-				}
-			}()
-		}
+		hy2Ctl = hy2.NewController(hy2.Config{
+			Listen:           ":" + strconv.Itoa(hy2Port),
+			Password:         cfg.hy2Password,
+			Authenticate:     srv.AuthenticateUUID,
+			CertFile:         cfg.hy2Cert,
+			KeyFile:          cfg.hy2Key,
+			SelfSignedDomain: cfg.hy2Domain,
+			PublicIP:         app.PublicIPv4(),
+			SkipProbe:        skipHy2Probe(),
+			Dial:             app.DialOutbound,
+			Logf:             log.Printf,
+		})
+		defer hy2Ctl.Close()
+		// 无论入口最终是否起来都要注册状态提供器：主控对缺失的 hy2 字段会
+		// 保留上次结果，不注册就会让订阅一直发布一个连不上的入口。
+		srv.SetHy2StatusProvider(hy2Ctl.Status)
+		// 首次探测放在 Sync 里，信号由上报循环下发；这里先按“希望开启”
+		// 同步一次，避免第一份上报（60 秒内）之前完全没有入口。
+		hy2Ctl.Sync(hy2.Signal{Enabled: true})
 	}
 
-	app.StartNodeSync(cfg.listen, cfg.wsPath, nodeCfg, srv, users, tunnelCtl, certCtl)
+	app.StartNodeSync(cfg.listen, cfg.wsPath, nodeCfg, srv, users, tunnelCtl, certCtl, hy2Ctl)
 
 	httpServer := &http.Server{
 		Addr:              cfg.listen,
@@ -132,9 +133,9 @@ func main() {
 	go func() {
 		defer close(shutdownDone)
 		<-ctx.Done()
-		if hy2Srv != nil {
+		if hy2Ctl != nil {
 			// 先停止接受新的 QUIC 连接，再排空 WS 会话。
-			hy2Srv.Close()
+			hy2Ctl.Close()
 		}
 		// 先关证书的 80/443 监听：它由 certCtl 独立持有，httpServer.Shutdown
 		// 管不到。不先关的话，排空期间仍能建立新的 HTTPS WebSocket 会话，
@@ -160,54 +161,10 @@ func main() {
 	<-shutdownDone
 }
 
-// startHysteria2 探测端口可达性后启动 Hysteria 2 入口。
-//
-// Hysteria 走 UDP，TCP 连通性测试对它没有意义；这里用 STUN 拿公网映射
-// 地址，只有映射端口与监听端口一致（说明没有 NAT 改写、端口确实对外开放）
-// 才启动。否则直接跳过并返回 nil：客户端会连上一个永远打不开的入口，
-// 不如让节点只提供 WS 入口。
-//
-// 显式设置 HY2_SKIP_PROBE=1 可以跳过探测强制启动，适用于探测被防火墙
-// 干扰但实际可达的环境。
-//
-// 认证复用 VLESS 的用户表：Hysteria 客户端提交的密码就是设备 UUID，因此
-// 主控不需要为 hy2 单独维护一套密码，订阅里直接用设备 UUID 即可。
-// HY2_PASSWORD 仍然有效，可作为额外的共享密码便于手工测试。
-func startHysteria2(cfg config, srv *app.Server) (*hy2.Server, error) {
-	// 端口固定：HY2_LISTEN 只是开关，值本身不参与监听地址，避免节点上
-	// 手写一个和主控订阅不一致的端口。
-	listen := ":" + strconv.Itoa(hy2Port)
-
-	if !skipHy2Probe() {
-		info := app.PublicIPv4()
-		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		result := hy2.ProbeReachability(ctx, listen, info)
-		cancel()
-
-		if !result.Reachable {
-			log.Printf("hysteria2: skip, %s", result.Reason)
-			return nil, nil
-		}
-		log.Printf("hysteria2: port reachable, %s", result.Reason)
-	}
-
-	hy2Srv, err := hy2.New(hy2.Config{
-		Listen:           listen,
-		Password:         cfg.hy2Password,
-		Authenticate:     srv.AuthenticateUUID,
-		CertFile:         cfg.hy2Cert,
-		KeyFile:          cfg.hy2Key,
-		SelfSignedDomain: cfg.hy2Domain,
-		Dial:             app.DialOutbound,
-		Logf:             log.Printf,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return hy2Srv, nil
-}
-
 // skipHy2Probe 判断是否跳过端口可达性探测。
+//
+// 探测逻辑本身在 hy2 包里，这里只负责读环境变量；HY2_SKIP_PROBE=1 用于
+// 探测被防火墙干扰但端口实际可达的环境。
 func skipHy2Probe() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("HY2_SKIP_PROBE"))) {
 	case "1", "true", "yes":

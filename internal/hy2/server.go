@@ -58,6 +58,15 @@ type Config struct {
 	Dial func(ctx context.Context, network, target string) (net.Conn, error)
 	// UDPIdleTimeout 是 UDP 会话空闲回收时间，默认 60s。
 	UDPIdleTimeout time.Duration
+	// PublicIP 是节点公网 IPv4，供端口可达性探测比对；为空时跳过探测。
+	//
+	// 由 main 注入 app.PublicIPv4 的结果：hy2 包不能反向 import app，
+	// 否则会形成循环依赖。
+	PublicIP string
+	// SkipProbe 为 true 时跳过端口可达性探测，直接绑定监听。
+	//
+	// 用于探测被防火墙干扰但端口实际可达的环境（对应 HY2_SKIP_PROBE=1）。
+	SkipProbe bool
 	// Logf 是可选的日志函数。
 	Logf func(format string, args ...any)
 }
