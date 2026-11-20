@@ -8,6 +8,9 @@ ARG TARGETARCH
 ARG TARGETVARIANT
 # Release 构建可传 --build-arg VERSION=v0.1.5 写入版本号；本地默认为 dev。
 ARG VERSION=dev
+# 临时隧道实现：默认构建纯 Go 版本；传 cloudflared 改为内嵌官方 cloudflared。
+# 例：docker build --build-arg BUILD_TAGS=cloudflared -t vless-small:cloudflared .
+ARG BUILD_TAGS=
 
 WORKDIR /src
 # 证书在构建平台安装, 运行阶段直接 COPY, 不在目标架构执行任何命令.
@@ -25,7 +28,7 @@ RUN set -eu; \
             *) echo "unsupported ARM variant: $TARGETVARIANT" >&2; exit 1 ;; \
         esac; \
     fi; \
-    go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/vless-small .
+    go build -tags "$BUILD_TAGS" -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/vless-small .
 
 # 运行阶段使用 Alpine; 全程无 RUN, 多架构构建不需要 QEMU.
 FROM alpine:latest

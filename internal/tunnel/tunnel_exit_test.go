@@ -1,3 +1,5 @@
+//go:build cloudflared
+
 package tunnel
 
 import (

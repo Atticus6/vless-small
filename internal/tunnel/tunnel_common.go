@@ -9,19 +9,21 @@ import (
 
 // Signal 是主控在节点上报响应里返回的临时隧道开关。
 //
-// 启用后节点使用 cloudflared quick tunnel 申请随机 *.trycloudflare.com
-// 地址；地址会随进程重启或重新申请变化，主控每次上报同步最新值。
+// 启用后节点用内置的 Quick Tunnel 客户端（cloudflared 或纯 Go 实现，
+// 由构建标签选择）申请随机 *.trycloudflare.com 地址；地址会随进程重启或
+// 重新申请变化，主控每次上报同步最新值。
 type Signal struct {
 	Enabled bool `json:"enabled"`
 }
 
 // Report 是节点临时隧道状态。
 //
-// Supported 当前构建固定为 true，保留字段用于兼容旧主控；URL 是
+// Supported 当前两种实现都为 true，保留字段用于兼容旧主控；URL 是
 // Cloudflare 分配的 *.trycloudflare.com 地址，不可用时为空。
 //
-// EdgeLocation 是 cloudflared 注册隧道时边缘返回的数据中心代码（IATA，
-// 例如 hkg/nrt/sjc），用于排查“隧道连到了哪个 colo”。未连接时为空。
+// EdgeLocation 是边缘返回的数据中心代码（IATA，例如 hkg/nrt/sjc），用于
+// 排查“隧道连到了哪个 colo”。cloudflared 构建会填充；纯 Go 实现暂不
+// 解析该字段，保持为空。
 type Report struct {
 	Supported    bool   `json:"supported"`
 	URL          string `json:"url,omitempty"`
@@ -39,6 +41,12 @@ type Controller interface {
 	Close()
 }
 
+// Version 由 main 在启动时注入，供纯 Go Quick Tunnel 客户端上报构建版本。
+//
+// cloudflared 构建使用内嵌的固定版本常量，不读取这个值；放在公共文件里
+// 是为了让两种实现共享同一份启动注入逻辑。
+var Version = "dev"
+
 // localTunnelPort 从监听地址中提取本地端口，供本地回源地址使用.
 //
 // ":8080"、"0.0.0.0:8080" 和 "[::]:8080" 都会得到 8080。
@@ -55,7 +63,7 @@ func localTunnelPort(listen string) (int, error) {
 	return value, nil
 }
 
-// localTunnelHost 从监听地址中提取 cloudflared 的回源主机.
+// localTunnelHost 从监听地址中提取临时隧道的回源主机.
 //
 // 通配地址（空、0.0.0.0、::）回源到 127.0.0.1；显式绑定某个地址时（例如
 // 192.168.1.10:8080）必须回源到该地址——服务没有监听回环，固定用

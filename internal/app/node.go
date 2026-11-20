@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/atticus6/vless-small/internal/cert"
@@ -105,8 +106,14 @@ type nodeReport struct {
 	Arch    string        `json:"arch,omitempty"`
 	Tunnel  tunnel.Report `json:"tunnel"`
 	Cert    cert.Report   `json:"cert"`
-	Listen  string        `json:"listen,omitempty"`
-	Path    string        `json:"path,omitempty"`
+	// TunnelReset 只在进程启动后的首份成功上报里为 true。
+	//
+	// 临时隧道地址随进程重启变化，上一个进程上报的地址一定失效；主控
+	// 收到该标志后先清空旧地址，避免重启到新地址分配之间订阅里出现
+	// 一个打不开的入口。
+	TunnelReset bool   `json:"tunnelReset,omitempty"`
+	Listen      string `json:"listen,omitempty"`
+	Path        string `json:"path,omitempty"`
 	// Egress 是本地出口地址列表和开关状态；非 local 运行时 addresses 为空。
 	Egress      *egressReport `json:"egress,omitempty"`
 	Hosts       []string      `json:"hosts,omitempty"`
@@ -222,9 +229,14 @@ func StartNodeSync(
 		)
 	}
 
-	result, err := syncDevices(
+	// 重启后旧隧道地址一定失效；首份上报带 tunnelReset 通知主控清空。
+	// 用 atomic 保存，首份上报失败时后台循环会继续带这个标志直到成功。
+	resetTunnel := &atomic.Bool{}
+	resetTunnel.Store(true)
+
+	result, err := syncDevicesWithReset(
 		cfg, srv, listen, path, static, info,
-		tunnelCtl.Status(), certCtl.Status(),
+		tunnelCtl.Status(), certCtl.Status(), resetTunnel,
 	)
 	if err != nil {
 		log.Printf("initial device sync failed: %v", err)
@@ -248,7 +260,7 @@ func StartNodeSync(
 	}
 	go syncLoop(
 		cfg, srv, listen, path, static, info,
-		tunnelCtl, certCtl,
+		tunnelCtl, certCtl, resetTunnel,
 	)
 	// 流量按设备 UUID 累计，每 30 分钟单独上报；自动休眠运行时没有常驻
 	// 进程，无法可靠累计，跳过。
@@ -263,14 +275,15 @@ func syncLoop(
 	info nodeInfo,
 	tunnelCtl tunnel.Controller,
 	certCtl cert.Controller,
+	resetTunnel *atomic.Bool,
 ) {
 	ticker := time.NewTicker(nodeSyncInterval)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		result, err := syncDevices(
+		result, err := syncDevicesWithReset(
 			cfg, srv, listen, path, static, info,
-			tunnelCtl.Status(), certCtl.Status(),
+			tunnelCtl.Status(), certCtl.Status(), resetTunnel,
 		)
 		if err != nil {
 			log.Printf("device sync failed: %v", err)
@@ -304,6 +317,24 @@ func syncDevices(
 	tunnel tunnel.Report,
 	cert cert.Report,
 ) (*nodeSyncResult, error) {
+	return syncDevicesWithReset(
+		cfg, srv, listen, path, static, info, tunnel, cert, nil,
+	)
+}
+
+// syncDevicesWithReset 是 syncDevices 的实现；resetTunnel 非空且仍为 true
+// 时，本次上报会带上 tunnelReset，成功后清除标志。
+func syncDevicesWithReset(
+	cfg NodeConfig,
+	srv *Server,
+	listen, path string,
+	static map[[16]byte]struct{},
+	info nodeInfo,
+	tunnel tunnel.Report,
+	cert cert.Report,
+	resetTunnel *atomic.Bool,
+) (*nodeSyncResult, error) {
+	reset := resetTunnel != nil && resetTunnel.Load()
 	// 即使没有检测到地址也上报空数组，节点切换到非 local 运行时 Web 才能
 	// 清掉旧的出口列表。
 	addresses := srv.EgressAddresses()
@@ -322,6 +353,7 @@ func syncDevices(
 		OS:          runtime.GOOS,
 		Arch:        runtimeAssetArch(),
 		Tunnel:      tunnel,
+		TunnelReset: reset,
 		Cert:        cert,
 		Listen:      listen,
 		Path:        path,
@@ -353,6 +385,10 @@ func syncDevices(
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("report %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	if reset {
+		// 主控已经接受本次上报，后续上报不必再重复清理。
+		resetTunnel.Store(false)
 	}
 
 	var result nodeReportResponse

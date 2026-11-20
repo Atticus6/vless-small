@@ -1,3 +1,5 @@
+//go:build cloudflared
+
 package tunnel
 
 import (
@@ -170,7 +172,10 @@ func envMiB(key string) (uint64, bool) {
 	return uint64(value) << 20, true
 }
 
+// Supported 表示当前构建支持临时隧道。
+//
 // cloudflared 作为 Go 依赖直接嵌入进程，不需要在节点上单独安装二进制。
+// 该实现只在 `-tags cloudflared` 时编译；默认构建使用纯 Go 版本。
 func Supported() bool { return true }
 
 func New(listen string) Controller {

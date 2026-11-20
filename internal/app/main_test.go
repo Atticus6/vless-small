@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -818,5 +820,49 @@ func TestHealthEndpoints(t *testing.T) {
 	defer wsResp.Body.Close()
 	if wsResp.StatusCode != http.StatusUpgradeRequired {
 		t.Fatalf("/ws status = %d, want 426", wsResp.StatusCode)
+	}
+}
+
+// TestSyncDevicesTunnelResetOnce 验证进程启动后的首份成功上报会带
+// tunnelReset，让主控清掉上一个进程遗留的隧道地址；成功后不再重复发送。
+func TestSyncDevicesTunnelResetOnce(t *testing.T) {
+	var mu sync.Mutex
+	var resets []bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		resets = append(resets, body["tunnelReset"] == true)
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"devices": []any{}})
+	}))
+	defer ts.Close()
+
+	srv := NewServer(nil, "")
+	cfg := NodeConfig{BaseURL: ts.URL, Name: "hk", Token: "secret"}
+	reset := &atomic.Bool{}
+	reset.Store(true)
+
+	for i := 0; i < 2; i++ {
+		if _, err := syncDevicesWithReset(
+			cfg, srv, ":8080", "/ws", nil,
+			nodeInfo{runtime: "vless-small"},
+			tunnel.Report{}, cert.Report{}, reset,
+		); err != nil {
+			t.Fatalf("sync %d: %v", i, err)
+		}
+	}
+
+	mu.Lock()
+	got := append([]bool(nil), resets...)
+	mu.Unlock()
+	if len(got) != 2 || !got[0] || got[1] {
+		t.Fatalf("tunnelReset flags = %v, want [true false]", got)
+	}
+	if reset.Load() {
+		t.Fatal("reset flag 未在成功上报后清除")
 	}
 }

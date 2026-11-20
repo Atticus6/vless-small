@@ -12,7 +12,8 @@
 | `main.go` | 组装 `app`/`tunnel`/`cert`，启动 HTTP 服务与优雅退出 |
 | `config.go` | 命令行/环境变量解析、路径规范化 |
 | `internal/app/` | 核心服务：`server.go`（用户表、健康检查）、`websocket.go`、`protocol.go`、`node.go`（CONFIG、上报、设备同步）、`push.go`、`update.go`、`platform.go`、`users.go`、`constants.go`；`egress*.go` 负责出口 IP 检测与 `/ipN` 路径选择，`traffic.go` 负责按设备统计与上报流量 |
-| `internal/tunnel/` | 临时隧道控制器：内嵌官方 cloudflared supervisor，申请 quick tunnel |
+| `internal/tunnel/` | 临时隧道控制器：默认使用 `internal/quicktunnel` 纯 Go 实现；`-tags cloudflared` 时内嵌官方 cloudflared supervisor |
+| `internal/quicktunnel/` | 纯 Go 临时隧道客户端：申请、QUIC 边缘连接、Cap'n Proto RPC 与 HTTP/WS 转发（默认构建使用） |
 | `internal/cert/` | ACME 自动证书：`cert_common.go`、`cert_impl.go`、`cert_stub.go` |
 | `internal/platform/` | 运行平台识别（local / Railway / Northflank 等） |
 | `version.txt` | 当前版本号，Release workflow 唯一版本来源 |
@@ -293,11 +294,39 @@ Engine 自动记录。设备或节点已不存在时也照常写入。
 
 ## 临时隧道（Cloudflare Quick Tunnel）
 
-构建直接内嵌**官方 cloudflared Go 实现**（`github.com/cloudflare/cloudflared`），
-调用其 `supervisor`、`connection`、`orchestration` 等包，把 cloudflared 编译进
-当前进程；节点上不需要安装 cloudflared 二进制。当前内嵌版本对应
-**2026.11.1**，连接器上报的 `tunnelBuildVersion` 与之一致；Cloudflare
-控制台按该版本判断支持状态，升级依赖时需同步修改这个常量。
+默认构建使用 `internal/quicktunnel` 的**纯 Go 实现**（只依赖 quic-go 和
+标准库）：进程内完成临时隧道申请、QUIC 边缘连接和 HTTP/WebSocket 转发，
+不链接 cloudflared。加 `-tags cloudflared` 时改为内嵌**官方 cloudflared**，
+调用其 `supervisor`、`connection`、`orchestration` 等包；该版本对应
+**2026.11.1**，连接器上报的 `tunnelBuildVersion` 与之一致，升级依赖时需
+同步修改这个常量。两种实现都不需要在节点上安装 cloudflared 二进制。
+
+### 选择隧道实现（编译期）
+
+```bash
+go build -o vless-small .                       # 默认：纯 Go Quick Tunnel
+go build -tags cloudflared -o vless-small .     # 内嵌官方 cloudflared
+
+docker build -t vless-small .                                              # 默认
+docker build --build-arg BUILD_TAGS=cloudflared -t vless-small:cloudflared .
+```
+
+两种实现的对外行为一致：主控开关、`/<token>/config` 的 `tunnel` 字段、
+`*.trycloudflare.com` 地址和断线重连逻辑都相同。差异：
+
+| 项 | native（默认） | cloudflared（`-tags cloudflared`） |
+| --- | --- | --- |
+| 依赖 | quic-go + 标准库 | 内嵌官方 cloudflared 及其全部依赖 |
+| 二进制体积 | 明显更小（不链接 cloudflared） | 较大 |
+| 边缘传输 | 仅 QUIC；UDP 7844 被封时不可用 | QUIC 或 HTTP/2，可自动回落 |
+| 边缘位置 | 暂不解析，保持为空 | 上报 `edgeLocation` |
+| 协议 / HA / 流控调优 | 不适用 | `TUNNEL_PROTOCOL`、`TUNNEL_HA_CONNECTIONS`、`TUNNEL_QUIC_*` |
+| 数据流类型 | 仅 HTTP/WebSocket（VLESS over WS 场景足够） | cloudflared 支持的类型 |
+
+`go.mod` 仍会保留 cloudflared 依赖——`go mod tidy` 会考虑所有构建标签——
+但默认二进制不会链接它。Release 默认发布纯 Go 版本；需要 cloudflared
+版本时用源码或 Docker 加 `-tags cloudflared` 构建。纯 Go 版本的线上链路
+建议先在 DNS 正常的节点上跑一次 `LIVE_TUNNEL=1` 集成测试。
 
 运行时行为：
 
@@ -307,15 +336,20 @@ Engine 自动记录。设备或节点已不存在时也照常写入。
   **地址随进程重启或重新申请变化**，不依赖 Cloudflare 账号里的命名隧道。
 - 节点地址随 `/api/nodes/report` 上报，主控写入 `vless.tunnel_address`，
   列表和指标弹框可直接看到当前临时地址。
-- 隧道回源到 `http://127.0.0.1:<PORT>`，接受任意 Host。
-- 协议默认 `auto`，由 cloudflared 自动选择 QUIC 或 HTTP/2；可用
+- 进程启动后的首份上报带 `tunnelReset: true`，主控先清空数据库里的
+  旧地址和边缘位置——上一个进程申请的地址在重启后一定失效，不能继续
+  出现在订阅里。本次上报若已申请到新地址，会覆盖清空结果。
+- 隧道回源到 `http://127.0.0.1:<PORT>`（显式绑定其他地址时回源到该地址），
+  接受任意 Host。
+- 默认（纯 Go）实现只使用 QUIC，需要出站 UDP 7844；cloudflared 构建在
+  UDP 不可用时还能回落 HTTP/2（出站 TCP 7844）。
+- cloudflared 构建的协议默认 `auto`，可用
   `TUNNEL_PROTOCOL=quic|http2|auto` 固定。
-- QUIC 需要出站 UDP 7844，HTTP/2 需要出站 TCP 7844。
-- 内嵌 cloudflared 的依赖和二进制体积明显大于自定义实现；只在隧道开启时
-  启动 supervisor，关闭后释放其连接和缓冲区。
+- cloudflared 构建只在隧道开启时启动 supervisor，关闭后释放其连接和缓冲区。
 
 ### 隧道连接与流控
 
+以下参数只对 `-tags cloudflared` 构建生效，默认（纯 Go）构建不读取它们。
 临时隧道的默认值按延迟和吞吐优先选取，内存受限的节点可以再收回：
 
 - `HAConnections = 2`：cloudflared 把新流分摊到两条边缘连接上，并发下载
@@ -510,7 +544,7 @@ curl -fsS "http://127.0.0.1:8080/${TOKEN}/config"
 1. 向 `<baseURL>/api/nodes/report` 上报节点信息；
 2. 使用 `Bearer <token>` 认证（`name` + `token` 必须与主控 `vless` 表中的记录一致）；
 3. 接收主控返回的所有设备，把启用设备的 `id` 当作 VLESS UUID 接受连接；
-4. 读取 `tunnel.enabled` 并启动/停止内置 cloudflared supervisor。
+4. 读取 `tunnel.enabled` 并启动/停止内置临时隧道客户端。
 
 节点信息由 vless-small 自动收集：
 
@@ -567,10 +601,28 @@ v2rayNG 的 URL 延迟测试和网页首次连接的时间，转发层做了三�
   建连就并行尝试下一个，某个地址立即失败时直接补位，不会因为一个失效
   地址把整条连接卡到超时。
 
+## 启动时启用 BBR（Linux）
+
+Linux 纯本机环境（`runtime=local`，且未检测到 Docker/Podman/Kubernetes
+等容器）启动时会尝试把 TCP 拥塞控制切换为 **BBR**：
+
+- 已经是 `bbr` 时直接返回，不重复写内核参数；
+- 内核没有加载 `tcp_bbr` 时尝试 `modprobe tcp_bbr`；
+- 内核不支持、缺少 `CAP_NET_ADMIN` 或 `modprobe` 不可用时只记录日志，
+  不影响服务启动；
+- 容器和 PaaS（Railway、Render、Northflank 等）直接跳过——容器内的
+  `/proc/sys` 属于宿主机或独立 netns，不应由应用修改。
+
+安装脚本生成的服务已授予 `CAP_NET_ADMIN`（systemd 的
+`AmbientCapabilities` / OpenRC 的 ambient capability）。**已有节点需要
+重跑一次 `install.sh` 才会带上这个能力**；之后每次启动都会自动尝试。
+手工用 root 运行二进制时不需要额外配置。
+
 ## 说明
 
-- 基础依赖只有 `github.com/gorilla/websocket`；额外内嵌
-  官方 `github.com/cloudflare/cloudflared`（临时隧道）及其依赖。
+- 基础依赖只有 `github.com/gorilla/websocket`；临时隧道默认使用纯 Go
+  实现（`github.com/quic-go/quic-go`），`-tags cloudflared` 时改为内嵌
+  官方 `github.com/cloudflare/cloudflared` 及其依赖。
 - 每条连接首条 WS 消息是 VLESS 请求头，响应头为 `[0x00, 0x00]`。
   **响应头在认证通过后立即发出**，不等待目标域名解析和 TCP 建连，
   客户端可以更早开始发送请求数据；目标拨号失败时会话直接关闭。

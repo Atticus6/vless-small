@@ -177,19 +177,19 @@ func (s *Server) relayTCP(
 				return
 			}
 
-				filled := 0
-				for {
-					n, readErr := reader.Read(buf[filled:])
-					filled += n
-					// 到达刷新阈值立即写目标：一条消息可以拆成多个
-					// 非终结帧，客户端可能发完半条就等响应。只在缓冲区
-					// 满或消息 EOF 时写会让双方互相等待。
-					if filled >= upstreamFlushSize {
-						if !writeUpstream(conn, buf[:filled], s, userID) {
-							return
-						}
-						filled = 0
+			filled := 0
+			for {
+				n, readErr := reader.Read(buf[filled:])
+				filled += n
+				// 到达刷新阈值立即写目标：一条消息可以拆成多个
+				// 非终结帧，客户端可能发完半条就等响应。只在缓冲区
+				// 满或消息 EOF 时写会让双方互相等待。
+				if filled >= upstreamFlushSize {
+					if !writeUpstream(conn, buf[:filled], s, userID) {
+						return
 					}
+					filled = 0
+				}
 				// io.EOF 表示当前消息读完，继续处理下一条；其他错误
 				// （连接中断、超时、协议错误）直接结束会话。
 				if readErr != nil {

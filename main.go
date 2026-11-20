@@ -18,6 +18,7 @@ import (
 
 	"github.com/atticus6/vless-small/internal/app"
 	"github.com/atticus6/vless-small/internal/cert"
+	"github.com/atticus6/vless-small/internal/platform"
 	"github.com/atticus6/vless-small/internal/tunnel"
 )
 
@@ -45,12 +46,18 @@ func main() {
 
 	cfg := parseFlags()
 	app.Version = version
+	// 纯 Go Quick Tunnel 实现用版本号构造 User-Agent 和注册信息；
+	// cloudflared 构建忽略这个值，两种实现共用同一注入入口。
+	tunnel.Version = version
 
 	// 版本查询必须在配置校验之前：安装脚本用它确认二进制可执行。
 	if cfg.showVersion {
 		fmt.Printf("vless-small %s\n", version)
 		return
 	}
+
+	// Linux 纯本机环境尽力开启 BBR；容器/PaaS/无权限时只记日志，不阻塞启动。
+	platform.TryEnableBBR()
 
 	nodeCfg, err := app.ParseNodeConfig(cfg.controlPlane)
 	if err != nil {
@@ -64,6 +71,10 @@ func main() {
 	if len(users) == 0 && nodeCfg.BaseURL == "" {
 		log.Fatal("missing -uuid (or UUID env) or -config (or CONFIG env)")
 	}
+
+	// 配置确认后才尝试系统级调优；Linux 纯本机环境尽力开启 BBR，
+	// 容器/PaaS/无权限时只记日志，不阻塞启动。
+	platform.TryEnableBBR()
 
 	srv := app.NewServer(users, cfg.wsPath)
 	srv.SetControlToken(nodeCfg.Token)

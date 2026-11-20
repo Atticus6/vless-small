@@ -7,6 +7,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/prometheus/client_golang v1.24.1
+	github.com/quic-go/quic-go v0.59.1
 	github.com/rs/zerolog v1.35.1
 	golang.org/x/crypto v0.58.0
 )
@@ -53,7 +54,6 @@ require (
 	github.com/prometheus/client_model v0.6.3 // indirect
 	github.com/prometheus/common v0.71.0 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
-	github.com/quic-go/quic-go v0.59.1 // indirect
 	github.com/rogpeppe/go-internal v1.16.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/shirou/gopsutil/v4 v4.26.3 // indirect

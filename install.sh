@@ -644,9 +644,10 @@ Restart=always
 RestartSec=3
 TimeoutStopSec=15
 NoNewPrivileges=true
-# 自动证书需要服务用户绑定 80/443；只授予低端口绑定能力。
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# 自动证书需要服务用户绑定 80/443；启动时尝试开启 BBR 需要写
+# /proc/sys/net/ipv4/tcp_congestion_control（CAP_NET_ADMIN）。
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
 PrivateTmp=true
 ProtectSystem=strict
 # 自更新需要在安装目录里写临时文件并 rename，必须显式放开。
@@ -689,8 +690,9 @@ write_openrc_files() {
     echo "output_log=\"${OPENRC_LOG}\""
     echo "error_log=\"${OPENRC_LOG}\""
     # cap_iab 格式：裸写只进 inheritable，降权后仍绑不了低端口；`^` 才是
-    # ambient，能随 exec 传给非 root 进程。
-    echo "capabilities=\"^cap_net_bind_service\""
+    # ambient，能随 exec 传给非 root 进程。cap_net_admin 用于启动时
+    # 尝试开启 BBR（写 /proc/sys/net/ipv4/tcp_congestion_control）。
+    echo "capabilities=\"^cap_net_bind_service ^cap_net_admin\""
   } >"$tmp"
   install_file "$tmp" "$OPENRC_CONFD" 0600
   rm -f "$tmp"
