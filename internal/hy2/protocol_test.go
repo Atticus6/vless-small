@@ -212,8 +212,11 @@ func TestNewValidatesConfig(t *testing.T) {
 	defer srv.Close()
 }
 
-// TestAuthenticateCallback 验证认证回调可以替代共享密码：回调返回 true 时
-// 通过、返回 false 时仍然 404，回调收到的是客户端提交的原始字符串。
+// TestAuthenticateCallback 验证认证回调可以替代共享密码：回调收到客户端
+// 提交的原始字符串，返回值决定认证结论。
+//
+// 直接测 authenticate() 而不是 ServeHTTP：后者在成功路径上要读 QUIC 连接
+// 的远端地址并启动 UDP 会话，需要真实连接，不适合单元测试。
 func TestAuthenticateCallback(t *testing.T) {
 	const uuid = "11111111-1111-4111-8111-111111111111"
 	var seen []string
@@ -224,35 +227,33 @@ func TestAuthenticateCallback(t *testing.T) {
 		},
 	}}
 
-	ok := &connHandler{srv: srv}
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "https://hysteria/auth", strings.NewReader(""))
-	req.Host = authHost
-	req.Header.Set(headerAuth, uuid)
-	ok.ServeHTTP(rec, req)
+	if !srv.authenticate(uuid) {
+		t.Fatal("callback accepted the uuid but authenticate returned false")
+	}
+	if srv.authenticate("not-a-uuid") {
+		t.Fatal("callback rejected the value but authenticate returned true")
+	}
+	if len(seen) != 2 || seen[0] != uuid || seen[1] != "not-a-uuid" {
+		t.Fatalf("callback saw %v, want the raw header values", seen)
+	}
+}
 
-	if rec.Code != statusAuthOK {
-		t.Fatalf("status = %d, want %d", rec.Code, statusAuthOK)
-	}
-	if !ok.authenticated.Load() {
-		t.Fatal("callback accepted the uuid but connection is not authenticated")
-	}
+// TestAuthenticateSharedPassword 验证共享密码仍然有效，且与回调同时配置时
+// 任意一个匹配即可通过。
+func TestAuthenticateSharedPassword(t *testing.T) {
+	srv := &Server{cfg: Config{
+		Password:     "secret",
+		Authenticate: func(auth string) bool { return auth == "device-uuid" },
+	}}
 
-	bad := &connHandler{srv: srv}
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "https://hysteria/auth", strings.NewReader(""))
-	req.Host = authHost
-	req.Header.Set(headerAuth, "not-a-uuid")
-	bad.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
+	if !srv.authenticate("secret") {
+		t.Fatal("shared password should authenticate")
 	}
-	if bad.authenticated.Load() {
-		t.Fatal("callback rejected the value but connection is authenticated")
+	if !srv.authenticate("device-uuid") {
+		t.Fatal("callback match should authenticate")
 	}
-	if len(seen) != 2 || seen[1] != "not-a-uuid" {
-		t.Fatalf("callback saw %v, want the raw header value", seen)
+	if srv.authenticate("wrong") {
+		t.Fatal("neither password nor callback matched, must reject")
 	}
 }
 

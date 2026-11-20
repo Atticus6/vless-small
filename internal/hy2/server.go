@@ -249,11 +249,6 @@ func (h *connHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	h.authenticated.Store(true)
 	h.writeAuthOK(w)
-	// conn 为 nil 只出现在直接构造 connHandler 的单元测试里：认证结论已经
-	// 写入，日志和 UDP 会话都依赖真实 QUIC 连接，跳过即可。
-	if h.conn == nil {
-		return
-	}
 	h.srv.cfg.Logf("hy2: authenticated client %s", h.conn.RemoteAddr())
 
 	h.udpOnce.Do(func() {

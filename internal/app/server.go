@@ -220,7 +220,7 @@ func (s *Server) SetStatusProviders(tunnelStatus func() tunnel.Report, certStatu
 
 // SetHy2StatusProvider 注入 Hysteria 2 入口状态；未配置入口时不调用。
 //
-// 上报和 /<token>/config 都通过它读取端口与 SNI，因此必须在
+// 上报和 /<token>/config 都通过它读取“入口是否已起来”，因此必须在
 // StartNodeSync 之前调用，避免首份上报漏掉 hy2 字段。
 func (s *Server) SetHy2StatusProvider(status func() hy2.Report) {
 	s.hy2Status = status
@@ -396,6 +396,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) bool {
 		if s.certStatus != nil {
 			cert = s.certStatus()
 		}
+
 		writeJSON(w, configResponse{
 			OK:                true,
 			Version:           Version,

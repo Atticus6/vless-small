@@ -359,8 +359,8 @@ func syncDevicesWithReset(
 		TunnelReset: reset,
 		Cert:        cert,
 		// 未配置 hy2 入口时 srv.hy2Status 为 nil，字段整体省略。
-		Hy2:     srv.hy2Report(),
-		Listen:  listen,
+		Hy2:         srv.hy2Report(),
+		Listen:      listen,
 		Path:        path,
 		Egress:      egress,
 		Hosts:       info.hosts,
