@@ -21,7 +21,7 @@ import (
 
 // Report 是 Hysteria 2 入口的运行状态，随节点上报同步给主控。
 //
-// 只有一个布尔值：端口、SNI、证书类型都是固定约定（UDP 8081、SNI
+// 只有一个布尔值：端口、SNI、证书类型都是固定约定（UDP 9500、SNI
 // bing.com、自签证书），主控侧直接按约定生成订阅，不需要节点逐项上报。
 // 密码也不在这里：客户端直接用设备 UUID 认证（见 Authenticate）。
 type Report struct {
@@ -32,7 +32,7 @@ type Report struct {
 
 // Config 是最小 Hysteria 2 服务端的启动参数。
 type Config struct {
-	// Listen 是 UDP 监听地址，例如 127.0.0.1:8081 或 :8443。
+	// Listen 是 UDP 监听地址，例如 127.0.0.1:9500 或 :9500。
 	Listen string
 	// Password 是共享认证密码；与 Authenticate 至少提供一个。
 	//

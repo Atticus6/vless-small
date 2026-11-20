@@ -7,7 +7,7 @@ import (
 )
 
 func TestProbeReachabilitySkipsLoopback(t *testing.T) {
-	result := ProbeReachability(context.Background(), "127.0.0.1:8081", "1.2.3.4")
+	result := ProbeReachability(context.Background(), "127.0.0.1:9500", "1.2.3.4")
 	if result.Reachable {
 		t.Fatal("loopback listen must not be reachable")
 	}
@@ -18,7 +18,7 @@ func TestProbeReachabilitySkipsLoopback(t *testing.T) {
 
 func TestProbeReachabilityRejectsPrivateIP(t *testing.T) {
 	for _, ip := range []string{"10.0.0.1", "192.168.1.5", "172.16.0.1", "100.64.0.1", "127.0.0.1", ""} {
-		result := ProbeReachability(context.Background(), ":8081", ip)
+		result := ProbeReachability(context.Background(), ":9500", ip)
 		if result.Reachable {
 			t.Fatalf("%q: private/empty IP must not be reachable", ip)
 		}
@@ -50,16 +50,16 @@ func TestIsPublicIP(t *testing.T) {
 }
 
 func TestSameEndpoint(t *testing.T) {
-	if !sameEndpoint("1.2.3.4:8081", "1.2.3.4:8081") {
+	if !sameEndpoint("1.2.3.4:9500", "1.2.3.4:9500") {
 		t.Fatal("identical endpoints should match")
 	}
-	if !sameEndpoint("[::1]:8081", "[0:0:0:0:0:0:0:1]:8081") {
+	if !sameEndpoint("[::1]:9500", "[0:0:0:0:0:0:0:1]:9500") {
 		t.Fatal("IPv6 forms should be equivalent")
 	}
-	if sameEndpoint("1.2.3.4:8081", "1.2.3.4:8082") {
+	if sameEndpoint("1.2.3.4:9500", "1.2.3.4:8082") {
 		t.Fatal("different ports must not match")
 	}
-	if sameEndpoint("1.2.3.4:8081", "1.2.3.5:8081") {
+	if sameEndpoint("1.2.3.4:9500", "1.2.3.5:9500") {
 		t.Fatal("different IPs must not match")
 	}
 }

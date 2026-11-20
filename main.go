@@ -90,7 +90,7 @@ func main() {
 	defer certCtl.Close()
 
 	// 可选的 Hysteria 2 入口：UDP/QUIC 直连节点，不经过 CDN。
-	// 设置 HY2_LISTEN（任意非空值）即启用，端口固定 8081——主控订阅按同一
+	// 设置 HY2_LISTEN（任意非空值）即启用，端口固定 9500——主控订阅按同一
 	// 常量生成，不需要节点上报端口。
 	//
 	// 入口做成可启停的 Controller：端口探测失败时入口会被跳过，主控可以在

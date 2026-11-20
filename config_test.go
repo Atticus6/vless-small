@@ -29,3 +29,15 @@ func TestParseFlagsTwice(t *testing.T) {
 		t.Fatal("showVersion = false, want true")
 	}
 }
+
+// TestHy2PortMatchesSubscription 锁定 hy2 端口约定。
+//
+// 端口在主控（apps/web 的 HY2_PORT）和节点（hy2Port）各写一份，订阅直接
+// 用主控的值、节点按自己的值监听——两边不一致时客户端会连到没人监听的
+// 端口，而单测和构建都不会报错。这里把节点侧的值钉死，改端口时必须同时
+// 改主控并更新这个断言。
+func TestHy2PortMatchesSubscription(t *testing.T) {
+	if hy2Port != 9500 {
+		t.Fatalf("hy2Port = %d, want 9500 (同步修改 apps/web 的 HY2_PORT)", hy2Port)
+	}
+}

@@ -17,7 +17,7 @@ type config struct {
 
 	// Hysteria 2 入口；Listen 为空表示不启动。
 	//
-	// 端口固定为 hy2Port（8081），主控订阅里也按同一常量生成，节点不需要
+	// 端口固定为 hy2Port（9500），主控订阅里也按同一常量生成，节点不需要
 	// 单独上报端口。HY2_LISTEN 只作为开关使用：任何非空值都启用。
 	hy2Listen   string
 	hy2Password string
@@ -30,8 +30,8 @@ type config struct {
 // hy2Port 是 Hysteria 2 入口固定的 UDP 端口。
 //
 // 与主控 apps/web 的 HY2_PORT 保持一致：订阅生成时直接写这个端口，
-// 不依赖节点上报。
-const hy2Port = 8081
+// 不依赖节点上报。改这里必须同步改 apps/web/worker/lib/subscription.ts。
+const hy2Port = 9500
 
 // parseFlags 读取命令行参数与环境变量，并规范化路径.
 //

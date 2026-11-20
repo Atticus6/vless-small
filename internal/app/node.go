@@ -330,7 +330,7 @@ func applyNodeSignals(
 // isLocalRuntime 判断节点是否运行在纯本机 Linux 环境。
 //
 // 与 certRuntimeAllowed 语义一致：只有显式上报 local 的节点才允许绑定
-// 公网端口（证书用 80/443，hy2 用 UDP 8081）。
+// 公网端口（证书用 80/443，hy2 用 UDP 9500）。
 func isLocalRuntime(runtime string) bool {
 	return strings.ToLower(strings.TrimSpace(runtime)) == "local"
 }
