@@ -28,7 +28,7 @@
 UUID=14725836-1234-5678-9abc-def012345678 go run .
 
 # 从主控同步设备（CONFIG = <baseURL>_<name>_<token>）
-CONFIG=https://dsh.atticus.eu.org_hk_<token> go run .
+CONFIG=https://dsh.example.com_hk_<token> go run .
 
 # 等价写法
 go run . -uuid 14725836-1234-5678-9abc-def012345678 -listen :8080 -path /ws
@@ -58,9 +58,9 @@ go run . -uuid 14725836-1234-5678-9abc-def012345678 -listen :8080 -path /ws
 不需要手动打 tag 或改版本号。如果要调整版本序列，直接修改 `version.txt`
 并推送，workflow 会从该值继续 +1。
 
-仓库是私有的。Web 控制台的“VLESS 管理”页会生成一条通过主控代理下载的
-安装命令，节点上不需要 GitHub Token（Worker 用自己的 `GITHUB_TOKEN`
-访问私有 Release）：
+仓库是公开的。Web 控制台的“VLESS 管理”页仍会生成一条通过主控代理下载的
+安装命令，节点不需要 GitHub 凭据（Worker 用 `GITHUB_TOKEN` 访问 Release，
+也能避开部分网络下 GitHub 直链不可用的问题）：
 
 ```bash
 NODE_NAME='hk-01'; NODE_TOKEN='<node token>'; \
@@ -72,9 +72,8 @@ NODE_NAME='hk-01'; NODE_TOKEN='<node token>'; \
 ```
 
 直接点页面上的“复制安装命令”即可，版本会自动取当前最新 Release。
-如果直连 GitHub（公开 fork 或本地有可用 token），仍可使用
-`--github-token` / `GITHUB_TOKEN`；私有仓库在部分网络下直链可能 404，
-优先使用上面的主控代理。
+如果直连 GitHub，仍可使用 `--github-token` / `GITHUB_TOKEN`；部分网络下
+GitHub 直链可能不可达，优先使用上面的主控代理。
 
 脚本按 `uname` 选择对应资产并校验 sha256，创建 `vless-small` 系统用户，把配置
 写入 `/etc/vless-small/vless-small.env`（0600），注册系统服务，最后用
@@ -503,7 +502,7 @@ curl -fsS "http://127.0.0.1:8080/${TOKEN}/config"
   },
   "tunnel": {
     "supported": true,
-    "url": "https://hk-tunnel.atticus.eu.org"
+    "url": "https://hk-tunnel.example.com"
   },
   "cert": {
     "supported": true,

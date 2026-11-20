@@ -548,11 +548,11 @@ func TestParseNodeConfig(t *testing.T) {
 		{name: "empty", raw: ""},
 		{
 			name: "valid",
-			raw:  "https://dsh.atticus.eu.org_hk_abc123",
-			want: NodeConfig{BaseURL: "https://dsh.atticus.eu.org", Name: "hk", Token: "abc123"},
+			raw:  "https://dsh.example.com_hk_abc123",
+			want: NodeConfig{BaseURL: "https://dsh.example.com", Name: "hk", Token: "abc123"},
 		},
-		{name: "missing token", raw: "https://dsh.atticus.eu.org_hk", wantErr: true},
-		{name: "bad scheme", raw: "ftp://dsh.atticus.eu.org_hk_abc123", wantErr: true},
+		{name: "missing token", raw: "https://dsh.example.com_hk", wantErr: true},
+		{name: "bad scheme", raw: "ftp://dsh.example.com_hk_abc123", wantErr: true},
 	}
 
 	for _, tt := range tests {
