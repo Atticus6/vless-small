@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/atticus6/vless-small/internal/cert"
+	"github.com/atticus6/vless-small/internal/hy2"
 	"github.com/atticus6/vless-small/internal/tunnel"
 )
 
@@ -106,6 +107,8 @@ type nodeReport struct {
 	Arch    string        `json:"arch,omitempty"`
 	Tunnel  tunnel.Report `json:"tunnel"`
 	Cert    cert.Report   `json:"cert"`
+	// Hy2 是 Hysteria 2 入口状态；节点没配置该入口时省略，主控按不支持处理。
+	Hy2 *hy2.Report `json:"hy2,omitempty"`
 	// TunnelReset 只在进程启动后的首份成功上报里为 true。
 	//
 	// 临时隧道地址随进程重启变化，上一个进程上报的地址一定失效；主控
@@ -355,7 +358,9 @@ func syncDevicesWithReset(
 		Tunnel:      tunnel,
 		TunnelReset: reset,
 		Cert:        cert,
-		Listen:      listen,
+		// 未配置 hy2 入口时 srv.hy2Status 为 nil，字段整体省略。
+		Hy2:     srv.hy2Report(),
+		Listen:  listen,
 		Path:        path,
 		Egress:      egress,
 		Hosts:       info.hosts,

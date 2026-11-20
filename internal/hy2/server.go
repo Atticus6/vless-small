@@ -19,12 +19,32 @@ import (
 	"github.com/apernet/quic-go/quicvarint"
 )
 
+// Report 是 Hysteria 2 入口的运行状态，随节点上报同步给主控。
+//
+// 只有一个布尔值：端口、SNI、证书类型都是固定约定（UDP 8081、SNI
+// bing.com、自签证书），主控侧直接按约定生成订阅，不需要节点逐项上报。
+// 密码也不在这里：客户端直接用设备 UUID 认证（见 Authenticate）。
+type Report struct {
+	// Enabled 表示入口已成功监听。端口探测不通过时启动阶段会跳过，
+	// 此时为 false，主控不应生成节点。
+	Enabled bool `json:"enabled"`
+}
+
 // Config 是最小 Hysteria 2 服务端的启动参数。
 type Config struct {
 	// Listen 是 UDP 监听地址，例如 127.0.0.1:8081 或 :8443。
 	Listen string
-	// Password 是 Hysteria 客户端的认证密码，不能为空。
+	// Password 是共享认证密码；与 Authenticate 至少提供一个。
+	//
+	// 接主控时通常留空：客户端提交的是设备 UUID，由 Authenticate 用节点
+	// 已有的用户表校验，节点上不必再维护一份独立密码。两者同时设置时
+	// 任意一个匹配即可通过。
 	Password string
+	// Authenticate 校验客户端提交的认证字符串；返回 true 表示通过。
+	//
+	// Hysteria 协议只允许客户端提交一个字符串，因此这里直接复用 VLESS 的
+	// 用户表：密码就是设备 UUID。回调在每条连接首次认证时调用一次。
+	Authenticate func(auth string) bool
 	// CertFile / KeyFile 是 TLS 证书；Hysteria 强制 TLS 1.3 + ALPN h3。
 	// 两者都为空时自动生成/复用自签证书（见 CertDir / SelfSignedDomain）。
 	CertFile string
@@ -49,6 +69,9 @@ type Server struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	once     sync.Once
+	// status 在 New 里一次算好（端口、SNI、证书来源之后都不会再变），
+	// 上报循环每 60 秒读取一次，不需要加锁。
+	status Report
 }
 
 // New 校验配置并绑定 UDP 端口。
@@ -57,8 +80,10 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Listen == "" {
 		return nil, errors.New("hy2: listen address is required")
 	}
-	if cfg.Password == "" {
-		return nil, errors.New("hy2: password is required")
+	// 密码与认证回调至少给一个：接主控时用回调按设备 UUID 校验，
+	// 手工测试时可以只给一个共享密码。
+	if cfg.Password == "" && cfg.Authenticate == nil {
+		return nil, errors.New("hy2: password or authenticate callback is required")
 	}
 	// 证书显式给出时必须成对出现；都不给则自动生成自签证书。
 	if (cfg.CertFile == "") != (cfg.KeyFile == "") {
@@ -103,7 +128,15 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("hy2: listen %s: %w", cfg.Listen, err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Server{cfg: cfg, listener: listener, ctx: ctx, cancel: cancel}, nil
+	srv := &Server{cfg: cfg, listener: listener, ctx: ctx, cancel: cancel}
+	// 能走到这里说明已经成功绑定 UDP 端口，入口视为启用。
+	srv.status = Report{Enabled: true}
+	return srv, nil
+}
+
+// Status 返回入口的运行状态，供节点上报同步给主控。
+func (s *Server) Status() Report {
+	return s.status
 }
 
 // Addr 返回实际监听的 UDP 地址；端口为 0 时可用于测试。
@@ -209,13 +242,18 @@ func (h *connHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	got := r.Header.Get(headerAuth)
-	if subtle.ConstantTimeCompare([]byte(got), []byte(h.srv.cfg.Password)) != 1 {
+	if !h.srv.authenticate(got) {
 		// 与 Hysteria 一致：认证失败时表现得像普通 Web 服务。
 		http.NotFound(w, r)
 		return
 	}
 	h.authenticated.Store(true)
 	h.writeAuthOK(w)
+	// conn 为 nil 只出现在直接构造 connHandler 的单元测试里：认证结论已经
+	// 写入，日志和 UDP 会话都依赖真实 QUIC 连接，跳过即可。
+	if h.conn == nil {
+		return
+	}
 	h.srv.cfg.Logf("hy2: authenticated client %s", h.conn.RemoteAddr())
 
 	h.udpOnce.Do(func() {
@@ -230,6 +268,22 @@ func (h *connHandler) writeAuthOK(w http.ResponseWriter) {
 	w.Header().Set(headerCCRX, "auto")
 	w.Header().Set(headerPadding, randomPadding(16))
 	w.WriteHeader(statusAuthOK)
+}
+
+// authenticate 判断客户端提交的认证字符串是否有效。
+//
+// 共享密码用常量时间比较，避免按字节比较泄露前缀；回调走节点用户表的
+// map 查找，本身就是常量时间。两者同时配置时任意一个匹配即通过，方便
+// 在接主控的节点上临时保留一个手工测试密码。
+func (s *Server) authenticate(got string) bool {
+	if got == "" {
+		return false
+	}
+	if s.cfg.Password != "" &&
+		subtle.ConstantTimeCompare([]byte(got), []byte(s.cfg.Password)) == 1 {
+		return true
+	}
+	return s.cfg.Authenticate != nil && s.cfg.Authenticate(got)
 }
 
 // dispatch 接管认证后的 TCP 数据流（帧类型 0x401）。

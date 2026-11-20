@@ -185,9 +185,21 @@ func TestNewValidatesConfig(t *testing.T) {
 	if _, err := New(Config{}); err == nil {
 		t.Fatal("missing listen should fail")
 	}
+	// 既没有共享密码也没有认证回调时无法完成认证，必须拒绝启动。
 	if _, err := New(Config{Listen: "127.0.0.1:0"}); err == nil {
-		t.Fatal("missing password should fail")
+		t.Fatal("missing password and authenticate callback should fail")
 	}
+	// 只给认证回调（接主控时的形态）是合法配置。
+	withCallback, err := New(Config{
+		Listen:       "127.0.0.1:0",
+		Authenticate: func(string) bool { return true },
+		CertDir:      t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("authenticate-only config should work: %v", err)
+	}
+	defer withCallback.Close()
+
 	// 不传证书是合法配置：会自动生成自签证书。
 	srv, err := New(Config{
 		Listen:   "127.0.0.1:0",
@@ -198,6 +210,89 @@ func TestNewValidatesConfig(t *testing.T) {
 		t.Fatalf("self-signed config should work: %v", err)
 	}
 	defer srv.Close()
+}
+
+// TestAuthenticateCallback 验证认证回调可以替代共享密码：回调返回 true 时
+// 通过、返回 false 时仍然 404，回调收到的是客户端提交的原始字符串。
+func TestAuthenticateCallback(t *testing.T) {
+	const uuid = "11111111-1111-4111-8111-111111111111"
+	var seen []string
+	srv := &Server{cfg: Config{
+		Authenticate: func(auth string) bool {
+			seen = append(seen, auth)
+			return auth == uuid
+		},
+	}}
+
+	ok := &connHandler{srv: srv}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "https://hysteria/auth", strings.NewReader(""))
+	req.Host = authHost
+	req.Header.Set(headerAuth, uuid)
+	ok.ServeHTTP(rec, req)
+
+	if rec.Code != statusAuthOK {
+		t.Fatalf("status = %d, want %d", rec.Code, statusAuthOK)
+	}
+	if !ok.authenticated.Load() {
+		t.Fatal("callback accepted the uuid but connection is not authenticated")
+	}
+
+	bad := &connHandler{srv: srv}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "https://hysteria/auth", strings.NewReader(""))
+	req.Host = authHost
+	req.Header.Set(headerAuth, "not-a-uuid")
+	bad.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	if bad.authenticated.Load() {
+		t.Fatal("callback rejected the value but connection is authenticated")
+	}
+	if len(seen) != 2 || seen[1] != "not-a-uuid" {
+		t.Fatalf("callback saw %v, want the raw header value", seen)
+	}
+}
+
+// TestAuthenticateRejectsEmpty 验证空认证头不会触发回调，避免回调把空串
+// 当成合法输入（例如把空串解析成全零 UUID）。
+func TestAuthenticateRejectsEmpty(t *testing.T) {
+	called := false
+	srv := &Server{cfg: Config{
+		Authenticate: func(string) bool {
+			called = true
+			return true
+		},
+	}}
+
+	if srv.authenticate("") {
+		t.Fatal("empty auth should never pass")
+	}
+	if called {
+		t.Fatal("callback should not be called for empty auth")
+	}
+}
+
+// TestStatusEnabled 验证成功绑定端口后上报 enabled=true。
+//
+// 端口/SNI/证书类型都是固定约定，主控不依赖节点上报，因此这里只校验
+// 唯一的字段。
+func TestStatusEnabled(t *testing.T) {
+	srv, err := New(Config{
+		Listen:   "127.0.0.1:0",
+		Password: "secret",
+		CertDir:  t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer srv.Close()
+
+	if !srv.Status().Enabled {
+		t.Fatal("server bound the port but status is not enabled")
+	}
 }
 
 // TestSelfSignedCertificateCached 验证自签证书会生成到磁盘并在第二次加载时

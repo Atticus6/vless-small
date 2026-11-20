@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/atticus6/vless-small/internal/cert"
+	"github.com/atticus6/vless-small/internal/hy2"
 	"github.com/atticus6/vless-small/internal/tunnel"
 	"github.com/gorilla/websocket"
 )
@@ -51,6 +52,9 @@ type Server struct {
 	// tunnelStatus / certStatus 由 main 注入，/<token>/config 返回实时状态。
 	tunnelStatus func() tunnel.Report
 	certStatus   func() cert.Report
+	// hy2Status 由 main 注入；未配置 Hysteria 2 入口时保持 nil，上报里
+	// 不出现该字段，主控按“节点不支持”处理。
+	hy2Status func() hy2.Report
 
 	// egress 是启动时检测到的本地出口地址，WS 路径 /ipN 通过它选择源 IP。
 	// 为空表示当前环境不启用按路径选择出口。
@@ -108,6 +112,8 @@ type configResponse struct {
 	// Tunnel / Cert 是内置隧道（固定或临时）与自动证书的实时状态。
 	Tunnel tunnel.Report `json:"tunnel"`
 	Cert   cert.Report   `json:"cert"`
+	// Hy2 是 Hysteria 2 入口状态；节点没配置该入口时为 nil。
+	Hy2 *hy2.Report `json:"hy2,omitempty"`
 	// Egress 是本地出口 IPv4 列表，第一项为默认出口；仅 runtime=local 时存在。
 	Egress        []egressAddress `json:"egress,omitempty"`
 	EgressEnabled bool            `json:"egressEnabled"`
@@ -212,6 +218,23 @@ func (s *Server) SetStatusProviders(tunnelStatus func() tunnel.Report, certStatu
 	s.certStatus = certStatus
 }
 
+// SetHy2StatusProvider 注入 Hysteria 2 入口状态；未配置入口时不调用。
+//
+// 上报和 /<token>/config 都通过它读取端口与 SNI，因此必须在
+// StartNodeSync 之前调用，避免首份上报漏掉 hy2 字段。
+func (s *Server) SetHy2StatusProvider(status func() hy2.Report) {
+	s.hy2Status = status
+}
+
+// hy2Report 返回当前 Hysteria 2 入口状态；未配置时返回 nil。
+func (s *Server) hy2Report() *hy2.Report {
+	if s.hy2Status == nil {
+		return nil
+	}
+	report := s.hy2Status()
+	return &report
+}
+
 func (s *Server) setUsers(users map[[16]byte]struct{}) {
 	if users == nil {
 		users = map[[16]byte]struct{}{}
@@ -235,6 +258,19 @@ func (s *Server) UserCount() int {
 		return 0
 	}
 	return len(*users)
+}
+
+// AuthenticateUUID 判断字符串形式的 UUID 是否在当前用户表里.
+//
+// 供 Hysteria 2 入口复用同一份用户表：Hysteria 客户端只提交一个密码字符串，
+// 这里把它当作设备 UUID 解析后查表。解析失败（不是合法 UUID）直接返回 false，
+// 调用方无需再区分“格式错误”和“不在表里”——两种情况对外都是认证失败。
+func (s *Server) AuthenticateUUID(raw string) bool {
+	id, err := parseUUID(raw)
+	if err != nil {
+		return false
+	}
+	return s.hasUser(id)
 }
 
 // addActiveUUID 记录一条已认证的 WS 连接.
@@ -360,7 +396,6 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) bool {
 		if s.certStatus != nil {
 			cert = s.certStatus()
 		}
-
 		writeJSON(w, configResponse{
 			OK:                true,
 			Version:           Version,
@@ -385,6 +420,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) bool {
 			System:        s.systemHealth(),
 			Tunnel:        tunnel,
 			Cert:          cert,
+			Hy2:           s.hy2Report(),
 			Egress:        s.EgressAddresses(),
 			EgressEnabled: s.EgressEnabled(),
 		})

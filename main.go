@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -89,15 +90,18 @@ func main() {
 	defer certCtl.Close()
 
 	// 可选的 Hysteria 2 入口：UDP/QUIC 直连节点，不经过 CDN。
-	// 只有显式设置 HY2_LISTEN 才启动；配置错误直接退出，避免带着坏配置跑。
+	// 设置 HY2_LISTEN（任意非空值）即启用，端口固定 8081——主控订阅按同一
+	// 常量生成，不需要节点上报端口。配置错误直接退出，避免带着坏配置跑。
 	var hy2Srv *hy2.Server
 	if cfg.hy2Listen != "" {
-		hy2Srv, err = startHysteria2(cfg, nodeCfg)
+		hy2Srv, err = startHysteria2(cfg, srv)
 		if err != nil {
 			log.Fatalf("hysteria2: %v", err)
 		}
 		if hy2Srv != nil {
 			defer hy2Srv.Close()
+			// 上报循环据此告诉主控要不要在订阅里生成 hysteria2 节点。
+			srv.SetHy2StatusProvider(hy2Srv.Status)
 			go func() {
 				log.Printf("hysteria2 listening on %s", hy2Srv.Addr())
 				if err := hy2Srv.Serve(); err != nil {
@@ -159,11 +163,19 @@ func main() {
 //
 // 显式设置 HY2_SKIP_PROBE=1 可以跳过探测强制启动，适用于探测被防火墙
 // 干扰但实际可达的环境。
-func startHysteria2(cfg config, nodeCfg app.NodeConfig) (*hy2.Server, error) {
+//
+// 认证复用 VLESS 的用户表：Hysteria 客户端提交的密码就是设备 UUID，因此
+// 主控不需要为 hy2 单独维护一套密码，订阅里直接用设备 UUID 即可。
+// HY2_PASSWORD 仍然有效，可作为额外的共享密码便于手工测试。
+func startHysteria2(cfg config, srv *app.Server) (*hy2.Server, error) {
+	// 端口固定：HY2_LISTEN 只是开关，值本身不参与监听地址，避免节点上
+	// 手写一个和主控订阅不一致的端口。
+	listen := ":" + strconv.Itoa(hy2Port)
+
 	if !skipHy2Probe() {
 		info := app.PublicIPv4()
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		result := hy2.ProbeReachability(ctx, cfg.hy2Listen, info)
+		result := hy2.ProbeReachability(ctx, listen, info)
 		cancel()
 
 		if !result.Reachable {
@@ -173,9 +185,10 @@ func startHysteria2(cfg config, nodeCfg app.NodeConfig) (*hy2.Server, error) {
 		log.Printf("hysteria2: port reachable, %s", result.Reason)
 	}
 
-	srv, err := hy2.New(hy2.Config{
-		Listen:           cfg.hy2Listen,
+	hy2Srv, err := hy2.New(hy2.Config{
+		Listen:           listen,
 		Password:         cfg.hy2Password,
+		Authenticate:     srv.AuthenticateUUID,
 		CertFile:         cfg.hy2Cert,
 		KeyFile:          cfg.hy2Key,
 		SelfSignedDomain: cfg.hy2Domain,
@@ -185,7 +198,7 @@ func startHysteria2(cfg config, nodeCfg app.NodeConfig) (*hy2.Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return srv, nil
+	return hy2Srv, nil
 }
 
 // skipHy2Probe 判断是否跳过端口可达性探测。

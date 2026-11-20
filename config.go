@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -15,6 +16,9 @@ type config struct {
 	showVersion  bool
 
 	// Hysteria 2 入口；Listen 为空表示不启动。
+	//
+	// 端口固定为 hy2Port（8081），主控订阅里也按同一常量生成，节点不需要
+	// 单独上报端口。HY2_LISTEN 只作为开关使用：任何非空值都启用。
 	hy2Listen   string
 	hy2Password string
 	hy2Cert     string
@@ -22,6 +26,12 @@ type config struct {
 	// hy2Domain 是自签证书的 CN/SAN；未配置证书时使用，默认 bing.com。
 	hy2Domain string
 }
+
+// hy2Port 是 Hysteria 2 入口固定的 UDP 端口。
+//
+// 与主控 apps/web 的 HY2_PORT 保持一致：订阅生成时直接写这个端口，
+// 不依赖节点上报。
+const hy2Port = 8081
 
 // parseFlags 读取命令行参数与环境变量，并规范化路径.
 //
@@ -39,8 +49,8 @@ func parseFlags() config {
 	path := flags.String("path", os.Getenv("WS_PATH"), "WebSocket path to accept (empty = any)")
 	controlPlane := flags.String("config", os.Getenv("CONFIG"), "control plane: <baseURL>_<name>_<token>")
 	showVersion := flags.Bool("version", false, "print version and exit")
-	hy2Listen := flags.String("hy2-listen", os.Getenv("HY2_LISTEN"), "Hysteria 2 UDP listen address (empty = disabled)")
-	hy2Password := flags.String("hy2-password", os.Getenv("HY2_PASSWORD"), "Hysteria 2 authentication password")
+	hy2Listen := flags.String("hy2-listen", os.Getenv("HY2_LISTEN"), "enable Hysteria 2 on UDP "+strconv.Itoa(hy2Port)+" (empty = disabled)")
+	hy2Password := flags.String("hy2-password", os.Getenv("HY2_PASSWORD"), "optional shared Hysteria 2 password (clients normally use their device UUID)")
 	hy2Cert := flags.String("hy2-cert", os.Getenv("HY2_CERT"), "Hysteria 2 TLS certificate file (empty = self-signed)")
 	hy2Key := flags.String("hy2-key", os.Getenv("HY2_KEY"), "Hysteria 2 TLS key file (empty = self-signed)")
 	hy2Domain := flags.String("hy2-domain", os.Getenv("HY2_DOMAIN"), "Hysteria 2 self-signed certificate CN/SAN (default bing.com)")

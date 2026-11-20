@@ -41,8 +41,8 @@ go run . -uuid 14725836-1234-5678-9abc-def012345678 -listen :8080 -path /ws
 | `-uuid` / `UUID` | — | 逗号分隔的静态 UUID；设置 `CONFIG` 时可选 |
 | `-path` / `WS_PATH` | 空（任意路径） | 只接受指定 WS 路径，如 `/ws` |
 | `-config` / `CONFIG` | — | `<baseURL>_<name>_<token>`，用于向主控上报并同步设备 |
-| `-hy2-listen` / `HY2_LISTEN` | 空（不启动） | Hysteria 2 的 UDP 监听地址，如 `:8443` |
-| `-hy2-password` / `HY2_PASSWORD` | — | Hysteria 2 认证密码，启用时必填 |
+| `-hy2-listen` / `HY2_LISTEN` | 空（不启动） | 启用 Hysteria 2 入口；端口固定 **UDP 8081**，值本身只作为开关 |
+| `-hy2-password` / `HY2_PASSWORD` | — | 可选的共享密码；接主控时客户端用设备 UUID 认证，无需设置 |
 | `-hy2-cert` / `HY2_CERT` | 空（自签） | Hysteria 2 的 TLS 证书；留空时自动生成自签证书 |
 | `-hy2-key` / `HY2_KEY` | 空（自签） | Hysteria 2 的 TLS 私钥；留空时自动生成自签证书 |
 | `-hy2-domain` / `HY2_DOMAIN` | `bing.com` | 自签证书的 CN/SAN |
@@ -646,11 +646,12 @@ go build -o vless-small .                              # 裸机/VPS：包含 BBR
 让客户端按网络选择“WS/CDN 模式”或“QUIC 直连模式”：
 
 ```bash
-# 自签证书：不传 -hy2-cert/-hy2-key，自动生成 bing.com 的自签证书并缓存
-vless-small -uuid <UUID> -hy2-listen :8443 -hy2-password '<password>'
+# 端口固定 UDP 8081；HY2_LISTEN 只作为开关，值本身不参与监听地址。
+# 接主控时不需要 -hy2-password：客户端用设备 UUID 认证（复用 VLESS 用户表）。
+vless-small -uuid <UUID> -hy2-listen 1
 
-# 正式证书
-vless-small -uuid <UUID> -hy2-listen :8443 -hy2-password '<password>' \
+# 正式证书（自签时省略 -hy2-cert/-hy2-key）
+vless-small -uuid <UUID> -hy2-listen 1 \
   -hy2-cert /path/fullchain.pem -hy2-key /path/privkey.pem
 ```
 
@@ -662,13 +663,19 @@ vless-small -uuid <UUID> -hy2-listen :8443 -hy2-password '<password>' \
 客户端配置（官方 Hysteria 客户端）：
 
 ```yaml
-server: node.example.com:8443
-auth: <password>
+server: node.example.com:8081
+auth: <设备 UUID>
 tls:
-  sni: node.example.com
+  sni: bing.com
+  insecure: true
 socks5:
   listen: 127.0.0.1:1080
 ```
+
+主控（`apps/web`）按同一组约定生成订阅：端口固定 8081、SNI 固定
+`bing.com`、密码用设备 UUID、自签证书带 `insecure`。节点只上报一个
+`hy2.enabled` 布尔值，表示入口有没有起来；端口可达性探测不通过时它会是
+`false`，订阅里就不会出现这条直连节点。
 
 实现范围（`internal/hy2/`）：
 
