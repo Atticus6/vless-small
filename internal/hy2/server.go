@@ -69,9 +69,9 @@ type Server struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	once     sync.Once
-	// status 在 New 里一次算好（端口、SNI、证书来源之后都不会再变），
-	// 上报循环每 60 秒读取一次，不需要加锁。
-	status Report
+	// status 在 New 里设为 enabled，Serve 因错误退出时改回 disabled。
+	// 上报循环每 60 秒并发读取，用 atomic 指针避免数据竞争。
+	status atomic.Pointer[Report]
 }
 
 // New 校验配置并绑定 UDP 端口。
@@ -130,13 +130,24 @@ func New(cfg Config) (*Server, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	srv := &Server{cfg: cfg, listener: listener, ctx: ctx, cancel: cancel}
 	// 能走到这里说明已经成功绑定 UDP 端口，入口视为启用。
-	srv.status = Report{Enabled: true}
+	srv.status.Store(&Report{Enabled: true})
 	return srv, nil
 }
 
 // Status 返回入口的运行状态，供节点上报同步给主控。
+//
+// 状态可变：Serve 因不可恢复错误退出后会把 Enabled 置回 false，否则主控
+// 会一直以为入口可用，订阅里持续发布一个连不上的节点。
 func (s *Server) Status() Report {
-	return s.status
+	if status := s.status.Load(); status != nil {
+		return *status
+	}
+	return Report{}
+}
+
+// setEnabled 更新上报状态；atomic 保证与上报循环的读取无竞争。
+func (s *Server) setEnabled(enabled bool) {
+	s.status.Store(&Report{Enabled: enabled})
 }
 
 // Addr 返回实际监听的 UDP 地址；端口为 0 时可用于测试。
@@ -174,7 +185,13 @@ func loadCertificate(cfg Config) (tls.Certificate, error) {
 }
 
 // Serve 接受 QUIC 连接，直到 Close 被调用。
+//
+// 无论正常退出还是因不可恢复错误退出，都会把上报状态置为 disabled：
+// 进程还活着但入口已经不再接受连接时，主控不能继续发布这个节点。正常
+// 退出（Close 触发）时进程马上结束，这个状态变更只是兜底。
 func (s *Server) Serve() error {
+	defer s.setEnabled(false)
+
 	for {
 		conn, err := s.listener.Accept(s.ctx)
 		if err != nil {

@@ -296,6 +296,43 @@ func TestStatusEnabled(t *testing.T) {
 	}
 }
 
+// TestStatusDisabledAfterServeExits 验证 Serve 退出后状态降级为 disabled。
+//
+// 进程还活着但入口不再接受连接时，主控不能继续发布这个节点；否则订阅里
+// 会一直留着一个连不上的 hysteria2 入口。
+func TestStatusDisabledAfterServeExits(t *testing.T) {
+	srv, err := New(Config{
+		Listen:   "127.0.0.1:0",
+		Password: "secret",
+		CertDir:  t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = srv.Serve()
+	}()
+
+	// 关掉监听让 Serve 返回；正常退出路径同样要把状态置回 disabled。
+	_ = srv.Close()
+	<-done
+
+	if srv.Status().Enabled {
+		t.Fatal("status stayed enabled after Serve returned")
+	}
+}
+
+// TestStatusZeroValue 验证未初始化状态返回 disabled，而不是 panic。
+func TestStatusZeroValue(t *testing.T) {
+	srv := &Server{}
+	if srv.Status().Enabled {
+		t.Fatal("zero-value server must report disabled")
+	}
+}
+
 // TestSelfSignedCertificateCached 验证自签证书会生成到磁盘并在第二次加载时
 // 复用，避免每次重启都重新生成。
 func TestSelfSignedCertificateCached(t *testing.T) {

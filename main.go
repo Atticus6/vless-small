@@ -98,7 +98,13 @@ func main() {
 		if err != nil {
 			log.Fatalf("hysteria2: %v", err)
 		}
-		if hy2Srv != nil {
+		// 无论入口是否起来都要注册状态提供器：主控对缺失的 hy2 字段会保留
+		// 上次结果，探测失败时不注册就会让订阅一直发布一个连不上的入口。
+		if hy2Srv == nil {
+			srv.SetHy2StatusProvider(func() hy2.Report {
+				return hy2.Report{Enabled: false}
+			})
+		} else {
 			defer hy2Srv.Close()
 			// 上报循环据此告诉主控要不要在订阅里生成 hysteria2 节点。
 			srv.SetHy2StatusProvider(hy2Srv.Status)
