@@ -2,6 +2,7 @@ package hy2
 
 import (
 	"testing"
+	"time"
 )
 
 // newTestController 构造一个跳过探测的控制器，绑定回环随机端口。
@@ -171,6 +172,64 @@ func TestControllerRetryAfterFailedProbe(t *testing.T) {
 
 	if got := ctl.(*controller).lastRetry; got != 1 {
 		t.Fatalf("lastRetry = %d, want 1 after explicit retry", got)
+	}
+}
+
+// TestControllerServeExitClearsServer 验证 Serve 退出后 c.server 被清空。
+//
+// Serve 出错退出时 Server 自己的 Status 会置 false，但如果 controller 的
+// c.server 仍指向那个已结束的实例，“非空 = 正在运行”的约定就被破坏，后续
+// 判断会误以为入口还活着。这里等 Serve goroutine 收尾后确认引用被清掉。
+func TestControllerServeExitClearsServer(t *testing.T) {
+	ctl := newTestController(t)
+	defer ctl.Close()
+
+	ctl.Sync(Signal{Enabled: true})
+	if ctl.(*controller).server == nil {
+		t.Fatal("setup: entry did not start")
+	}
+
+	// Close 会让 Serve 返回；等异步收尾把 c.server 清掉。
+	srv := ctl.(*controller).server
+	_ = srv.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if ctl.(*controller).server == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if got := ctl.(*controller).server; got != nil {
+		t.Fatal("c.server still points to a stopped server")
+	}
+	if ctl.Status().Enabled {
+		t.Fatal("status stayed enabled after Serve exited")
+	}
+}
+
+// TestControllerServeExitDoesNotClearNewServer 验证旧的 Serve goroutine 退出时
+// 不会误清掉后来启动的新入口。
+func TestControllerServeExitDoesNotClearNewServer(t *testing.T) {
+	ctl := newTestController(t)
+	defer ctl.Close()
+
+	ctl.Sync(Signal{Enabled: true, Retry: 1})
+	old := ctl.(*controller).server
+
+	// 重试会停掉旧入口并绑定新的；旧 Serve goroutine 稍后才退出。
+	ctl.Sync(Signal{Enabled: true, Retry: 2})
+	newSrv := ctl.(*controller).server
+	if newSrv == nil || newSrv == old {
+		t.Fatal("setup: retry did not install a new server")
+	}
+
+	// 给旧 goroutine 一点时间收尾，确认它没有把新引用清掉。
+	_ = old.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	if ctl.(*controller).server != newSrv {
+		t.Fatal("stale Serve goroutine cleared the new server")
 	}
 }
 

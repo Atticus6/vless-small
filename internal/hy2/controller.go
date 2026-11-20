@@ -118,7 +118,24 @@ func (c *controller) Sync(signal Signal) {
 		if err := srv.Serve(); err != nil {
 			c.cfg.Logf("hy2: %v", err)
 		}
+		// Serve 退出后入口已不再接受连接，清掉 c.server，让“非空 = 正在
+		// 运行”这个约定始终成立。不重置 attempted：探测失败的节点仍要等
+		// 管理员显式递增 Retry 才重新尝试，不能因为 Serve 退出就自动重试。
+		c.clearServerIfCurrent(srv)
 	}()
+}
+
+// clearServerIfCurrent 在 c.server 仍指向 srv 时清空它。
+//
+// Sync 期间可能已经用新 server 替换或调用了 Close，此时不能清掉新的引用；
+// 用指针相等判断，避免过期的 Serve goroutine 误伤后来启动的入口。
+func (c *controller) clearServerIfCurrent(srv *Server) {
+	c.syncMu.Lock()
+	defer c.syncMu.Unlock()
+
+	if c.server == srv {
+		c.server = nil
+	}
 }
 
 // start 探测端口可达性后绑定监听；探测不通过时返回 (nil, nil)。
