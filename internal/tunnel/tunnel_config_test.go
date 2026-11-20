@@ -67,7 +67,7 @@ func TestTunnelQUICFlowLimits(t *testing.T) {
 	t.Setenv("TUNNEL_QUIC_CONN_FLOW_MIB", "")
 	t.Setenv("TUNNEL_QUIC_STREAM_FLOW_MIB", "")
 	conn, stream := tunnelQUICFlowLimits()
-	if conn != 8<<20 || stream != 2<<20 {
+	if conn != tunnelQUICConnFlowLimit || stream != tunnelQUICStreamFlowLimit {
 		t.Fatalf("defaults = %d/%d", conn, stream)
 	}
 
@@ -81,7 +81,7 @@ func TestTunnelQUICFlowLimits(t *testing.T) {
 	t.Setenv("TUNNEL_QUIC_CONN_FLOW_MIB", "0")
 	t.Setenv("TUNNEL_QUIC_STREAM_FLOW_MIB", "999")
 	conn, stream = tunnelQUICFlowLimits()
-	if conn != 8<<20 || stream != 2<<20 {
+	if conn != tunnelQUICConnFlowLimit || stream != tunnelQUICStreamFlowLimit {
 		t.Fatalf("invalid = %d/%d, want defaults", conn, stream)
 	}
 }

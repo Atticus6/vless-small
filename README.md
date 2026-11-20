@@ -314,23 +314,25 @@ Engine 自动记录。设备或节点已不存在时也照常写入。
 - 内嵌 cloudflared 的依赖和二进制体积明显大于自定义实现；只在隧道开启时
   启动 supervisor，关闭后释放其连接和缓冲区。
 
-### 降低 cloudflared 内存占用
+### 隧道连接与流控
 
-内嵌 cloudflared 的运行时内存主要来自 HA 连接、QUIC 流控窗口和 Go 堆。
-本实现默认做了以下收敛：
+临时隧道的默认值按延迟和吞吐优先选取，内存受限的节点可以再收回：
 
-- `HAConnections = 1`（原 cloudflared 推荐 2–4）；需要冗余时用
-  `TUNNEL_HA_CONNECTIONS=2..4` 调高。
-- QUIC 连接级流控窗口从 30 MiB 降到 **8 MiB**，流级从 6 MiB 降到 **2 MiB**；
-  高带宽场景可用 `TUNNEL_QUIC_CONN_FLOW_MIB` / `TUNNEL_QUIC_STREAM_FLOW_MIB`
-  调大（1–256 MiB）。
+- `HAConnections = 2`：cloudflared 把新流分摊到两条边缘连接上，并发下载
+  更容易吃满链路，单条连接抖动时另一条仍可用。内存紧张可用
+  `TUNNEL_HA_CONNECTIONS=1` 降回单连接（上限 4）。
+- QUIC 连接级/流级流控窗口 **32 MiB / 8 MiB**：高 BDP 链路上不会因为窗口
+  太小把吞吐卡在 `窗口/RTT`；需要省内存时用
+  `TUNNEL_QUIC_CONN_FLOW_MIB` / `TUNNEL_QUIC_STREAM_FLOW_MIB` 调小（1–256 MiB）。
 - 内部日志默认 `error`，避免高频日志分配；排查时用
   `TUNNEL_LOG_LEVEL=info|debug`。
-- 内存敏感环境可设 `TUNNEL_PROTOCOL=http2`，避免 quic-go 的额外缓冲；
+- UDP 7844 被限制、或希望进一步压低内存时可设 `TUNNEL_PROTOCOL=http2`；
   代价是失去 QUIC 的连接迁移和部分弱网优势。
 - 不需要隧道时在主控关闭开关，supervisor 会退出并释放连接。
 
-还可以用 Go 运行时限制堆上限（Go 1.19+）：
+还可以用 Go 运行时限制堆上限（Go 1.19+）。二进制在 `GOGC` 未显式设置时
+默认使用 **200**（用更多堆内存换更少的 GC 停顿，偏向延迟和吞吐）；下面是
+内存敏感环境里把它收回的写法：
 
 ```bash
 # systemd unit
@@ -570,6 +572,10 @@ v2rayNG 的 URL 延迟测试和网页首次连接的时间，转发层做了三�
 - 基础依赖只有 `github.com/gorilla/websocket`；额外内嵌
   官方 `github.com/cloudflare/cloudflared`（临时隧道）及其依赖。
 - 每条连接首条 WS 消息是 VLESS 请求头，响应头为 `[0x00, 0x00]`。
+  **响应头在认证通过后立即发出**，不等待目标域名解析和 TCP 建连，
+  客户端可以更早开始发送请求数据；目标拨号失败时会话直接关闭。
+- WS 读写缓冲和 TCP/UDP 转发缓冲均为 64 KiB，用内存换更少的系统调用
+  和更平滑的吞吐（大消息不会再被 4 KiB 帧放大成多次写）。
 - 支持 `cmd=1`（TCP）与 `cmd=2`（UDP，`[2B 长度][数据]` 分包）。
 - 服务端每 25s 发一次 WS ping，客户端回 pong 即续期 60s 读超时。
 - TLS 不内置；生产环境请放在反向代理后面，并记得给代理配置 Upgrade 头与较长的读超时。

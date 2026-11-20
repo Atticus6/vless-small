@@ -259,6 +259,54 @@ func TestTCPRelay(t *testing.T) {
 	}
 }
 
+// TestTCPRelayResponseHeaderBeforeDial 验证响应头在目标拨号之前发出：
+// 目标不可达时客户端仍应立刻收到 [0,0]，而不是等拨号失败后才回。
+//
+// 这个顺序让客户端可以在节点解析/建连目标的同时发送请求 payload，
+// 把“节点 → 目标”的建连 RTT 与客户端发包重叠；Xray 服务端也是同样顺序。
+func TestTCPRelayResponseHeaderBeforeDial(t *testing.T) {
+	id := mustTestUUID(t)
+
+	// 先占用一个本地端口再释放，得到一个当前必然拒绝连接的地址，
+	// 用它模拟“拨号失败”而不影响其他用例。
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	target := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("close listener: %v", err)
+	}
+
+	ts := newTestWSServer(t, map[[16]byte]struct{}{id: {}}, "")
+	ws := dialTestWS(t, ts)
+
+	req := buildRequest(t, id, cmdTCP, target, nil)
+	if err := ws.WriteMessage(websocket.BinaryMessage, req); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	_, resp, err := ws.ReadMessage()
+	if err != nil {
+		t.Fatalf("read response header before dial: %v", err)
+	}
+	if !bytes.Equal(resp, []byte{vlessVersion, 0}) {
+		t.Fatalf("response header = %v", resp)
+	}
+
+	// 拨号失败后服务端关闭会话，客户端应收到关闭而不是继续等待数据。
+	// 读取超时说明服务端还挂着，不能当作“已关闭”放过。
+	_ = ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, _, err = ws.ReadMessage()
+	if err == nil {
+		t.Fatal("expected session to close after target dial failure")
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		t.Fatalf("session stayed open after target dial failure: %v", err)
+	}
+}
+
 // TestTCPRelayLargeMessage 覆盖单条 WS 消息远大于转发缓冲区的情况：
 // 服务端必须按块流式转发，不能假设一条消息对应一次 Read。
 func TestTCPRelayLargeMessage(t *testing.T) {

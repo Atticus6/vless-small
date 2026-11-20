@@ -187,9 +187,11 @@ func NewServer(users map[[16]byte]struct{}, path string) *Server {
 		egress:  newEgressSelector(detectEgressIPs()),
 		traffic: newTrafficCounter(),
 		upgrader: websocket.Upgrader{
-			CheckOrigin:     func(*http.Request) bool { return true },
-			ReadBufferSize:  4096,
-			WriteBufferSize: 4096,
+			CheckOrigin: func(*http.Request) bool { return true },
+			// 缓冲按连接分配；取 64 KiB 是为了合并客户端的 4 KiB 帧、
+			// 减少每次消息的读写系统调用（见 constants.go 的说明）。
+			ReadBufferSize:  wsReadBufferSize,
+			WriteBufferSize: wsWriteBufferSize,
 		},
 	}
 	for id := range users {

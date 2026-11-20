@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -25,7 +26,23 @@ import (
 // 再复制给 app.Version 供上报和 /healthz 使用。
 var version = "dev"
 
+// tuneGC 在用户没有显式设置 GOGC 时放宽 GC 目标。
+//
+// 转发路径已经用池化缓冲把稳态分配压得很低，但连接建立/断开仍会产生一批
+// 短生命周期对象；默认 GOGC=100 会让这些对象触发的 GC 更频繁地抢占转发
+// goroutine 的 CPU。放宽到 200 用更多堆内存换更少的 GC 周期，对延迟和吞吐
+// 都更友好。内存受限的节点仍可用 GOGC=50/100 或 GOMEMLIMIT 覆盖；只要显式
+// 设置了 GOGC，这里就不改动运行时的默认值。
+func tuneGC() {
+	if os.Getenv("GOGC") != "" {
+		return
+	}
+	debug.SetGCPercent(200)
+}
+
 func main() {
+	tuneGC()
+
 	cfg := parseFlags()
 	app.Version = version
 

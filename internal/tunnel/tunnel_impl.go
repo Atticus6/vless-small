@@ -61,18 +61,20 @@ func (r tolerantRegisterer) MustRegister(collectors ...prometheus.Collector) {
 
 var tunnelMetricsOnce sync.Once
 
-// 以下常量与 cloudflared quick tunnel 的推荐配置保持一致；内存敏感项
-// （HA 连接数、QUIC 流控窗口）默认调低，可通过环境变量进一步覆盖。
+// 以下常量与 cloudflared quick tunnel 的推荐配置保持一致。这里按延迟和
+// 吞吐优先取值，不再为省内存刻意调低；内存受限的节点仍可用环境变量回收。
 const (
 	tunnelGracePeriod          = 30 * time.Second
-	tunnelDefaultHAConnections = 1
+	tunnelDefaultHAConnections = 2
 	tunnelMaxRetries           = 5
 	tunnelMaxEdgeAddrRetries   = 8
 	tunnelRPCTimeout           = 5 * time.Second
-	// QUIC 流控窗口越小，单个连接预留/可增长的内存越少；8 MiB / 2 MiB
-	// 对 VLESS 转发足够，极端高带宽场景可通过环境变量恢复更大值。
-	tunnelQUICConnFlowLimit   = 8 * (1 << 20) // 8 MiB
-	tunnelQUICStreamFlowLimit = 2 * (1 << 20) // 2 MiB
+	// QUIC 流控窗口决定单条流可同时在途的字节上限（约等于带宽 × RTT）。
+	// 取 32 MiB / 8 MiB：高 BDP 链路上不会因为窗口太小把吞吐卡在
+	// 窗口/RTT；单连接预留给内存的仍是有界值。需要更省内存时用
+	// TUNNEL_QUIC_CONN_FLOW_MIB / TUNNEL_QUIC_STREAM_FLOW_MIB 调小。
+	tunnelQUICConnFlowLimit   = 32 * (1 << 20) // 32 MiB
+	tunnelQUICStreamFlowLimit = 8 * (1 << 20)  // 8 MiB
 
 	// 上报给 Cloudflare 的客户端版本标识，不影响隧道功能。
 	// Cloudflare 会按连接器版本判断支持状态，需与内嵌 cloudflared 版本
@@ -96,8 +98,9 @@ var quickTunnelHTTPClient = &http.Client{
 
 // tunnelHAConnections 返回与 Cloudflare 边缘保持的连接数。
 //
-// 默认 1 条，足够单节点转发，也显著减少 cloudflared 的连接/缓冲内存；
-// 需要冗余时可用 TUNNEL_HA_CONNECTIONS=2..4 调高。
+// 默认 2 条：cloudflared 会把新流分摊到各条边缘连接上，并发下载时
+// 更容易吃满多核和链路带宽；其中一条抖动时另一条仍可用，握手/重连
+// 不会让所有流一起卡住。内存受限时可用 TUNNEL_HA_CONNECTIONS=1 收回。
 func tunnelHAConnections() int {
 	raw := strings.TrimSpace(os.Getenv("TUNNEL_HA_CONNECTIONS"))
 	if raw == "" {
@@ -141,8 +144,8 @@ func tunnelLogLevel() string {
 
 // tunnelQUICFlowLimits 返回 QUIC 连接级/流级流控窗口（字节）。
 //
-// 默认 8 MiB / 2 MiB，比 cloudflared 默认更省内存；高带宽节点可用
-// TUNNEL_QUIC_CONN_FLOW_MIB / TUNNEL_QUIC_STREAM_FLOW_MIB 调大（1–256 MiB）。
+// 默认 32 MiB / 8 MiB，优先保证高 BDP 链路的吞吐；内存受限的节点可用
+// TUNNEL_QUIC_CONN_FLOW_MIB / TUNNEL_QUIC_STREAM_FLOW_MIB 调小（1–256 MiB）。
 func tunnelQUICFlowLimits() (uint64, uint64) {
 	conn := uint64(tunnelQUICConnFlowLimit)
 	stream := uint64(tunnelQUICStreamFlowLimit)

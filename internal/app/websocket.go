@@ -67,6 +67,18 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	// 连接在 relay 返回后关闭；先登记再 defer，确保异常退出也会清理。
 	defer s.removeActiveUUID(id)
 
+	// VLESS 响应头必须在目标拨号之前发出。
+	//
+	// 客户端（尤其 Xray/sing-box 系）在收到响应头后才把首个请求 payload
+	// 交给代理；如果等服务端 DNS + TCP 建连完成后才回响应头，客户端就要
+	// 多等一个“节点 → 目标”的建连时间才能开始发送，首字节延迟直接翻倍。
+	// 这里与 Xray 服务端一致：认证通过即回 [版本, addon 长度 0]，把目标
+	// 建连与客户端发送请求的 RTT 重叠起来。代价是目标拨号失败时客户端
+	// 已经看到成功的响应头，随后收到连接关闭，需要在客户端侧报错。
+	if err := writeMessage(ws, []byte{vlessVersion, 0}); err != nil {
+		return
+	}
+
 	// 认证通过后再启用 pong 续期, 未认证连接无法拖延 headerTimeout.
 	ws.SetPongHandler(func(string) error {
 		return ws.SetReadDeadline(time.Now().Add(readTimeout))
@@ -110,7 +122,7 @@ func pingLoop(ws *websocket.Conn, stop <-chan struct{}) {
 	}
 }
 
-// relayBufferPool 复用 TCP 转发缓冲区。
+// relayBufferPool 复用 TCP/UDP 转发缓冲区。
 //
 // 大流量下每条连接每秒会经历成百上千次读；复用固定大小的缓冲区可以避免
 // 每条连接各自持有一份，也给 GC 减压。
@@ -139,10 +151,7 @@ func (s *Server) relayTCP(
 	}
 	defer conn.Close()
 
-	// VLESS 响应头: version + addon 长度 0.
-	if err := writeMessage(ws, []byte{vlessVersion, 0}); err != nil {
-		return
-	}
+	// 响应头已由 handleWS 在拨号前发出，这里可以直接写早期数据。
 	if len(early) > 0 {
 		_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 		if _, err := conn.Write(early); err != nil {
@@ -168,16 +177,19 @@ func (s *Server) relayTCP(
 				return
 			}
 
-			filled := 0
-			for {
-				n, readErr := reader.Read(buf[filled:])
-				filled += n
-				if filled == len(buf) {
-					if !writeUpstream(conn, buf[:filled], s, userID) {
-						return
+				filled := 0
+				for {
+					n, readErr := reader.Read(buf[filled:])
+					filled += n
+					// 到达刷新阈值立即写目标：一条消息可以拆成多个
+					// 非终结帧，客户端可能发完半条就等响应。只在缓冲区
+					// 满或消息 EOF 时写会让双方互相等待。
+					if filled >= upstreamFlushSize {
+						if !writeUpstream(conn, buf[:filled], s, userID) {
+							return
+						}
+						filled = 0
 					}
-					filled = 0
-				}
 				// io.EOF 表示当前消息读完，继续处理下一条；其他错误
 				// （连接中断、超时、协议错误）直接结束会话。
 				if readErr != nil {
@@ -239,9 +251,7 @@ func (s *Server) relayUDP(
 	}
 	defer conn.Close()
 
-	if err := writeMessage(ws, []byte{vlessVersion, 0}); err != nil {
-		return
-	}
+	// 响应头已由 handleWS 在拨号前发出。
 	framer := &udpFramer{}
 	if len(early) > 0 {
 		written, err := framer.feed(conn, early)
@@ -255,21 +265,37 @@ func (s *Server) relayUDP(
 
 	go func() {
 		defer conn.Close()
+		// 用 NextReader + 池化缓冲读取，避免 ReadMessage 为每条 datagram
+		// 分配一次内存：DNS/QUIC 场景下 UDP 会话和小包都很密集。
+		buf := relayBufferPool.Get().([]byte)
+		defer relayBufferPool.Put(buf)
+
 		for {
-			_, data, err := ws.ReadMessage()
+			_, reader, err := ws.NextReader()
 			if err != nil {
 				return
 			}
-			_ = ws.SetReadDeadline(time.Now().Add(readTimeout))
-			if len(data) > 0 {
-				written, err := framer.feed(conn, data)
-				if written > 0 {
-					s.addTraffic(userID, uint64(written), 0)
+			for {
+				n, readErr := reader.Read(buf)
+				if n > 0 {
+					written, writeErr := framer.feed(conn, buf[:n])
+					if written > 0 {
+						s.addTraffic(userID, uint64(written), 0)
+					}
+					if writeErr != nil {
+						return
+					}
 				}
-				if err != nil {
+				// io.EOF 表示当前 WS 消息结束；包边界与消息边界无关，
+				// 不完整的包留在 framer 里等下一帧。
+				if readErr != nil {
+					if readErr == io.EOF {
+						break
+					}
 					return
 				}
 			}
+			_ = ws.SetReadDeadline(time.Now().Add(readTimeout))
 		}
 	}()
 
