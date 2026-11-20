@@ -60,8 +60,6 @@ type controller struct {
 	// 期间可能还有在途的上报请求返回 Enabled=true，若没有这个标志，Sync 会
 	// 在 HTTP 关闭和会话排空期间重新拉起入口，直到 main 的 defer Close 才停。
 	closed bool
-	// lastErr 记录最近一次失败原因，便于日志排查。
-	lastErr error
 }
 
 // NewController 创建可启停的控制器。
@@ -126,7 +124,6 @@ func (c *controller) Sync(signal Signal) {
 
 	srv, err := c.start()
 	if err != nil {
-		c.lastErr = err
 		c.cfg.Logf("hy2: start failed: %v", err)
 		return
 	}
@@ -135,7 +132,6 @@ func (c *controller) Sync(signal Signal) {
 		return
 	}
 
-	c.lastErr = nil
 	c.server = srv
 	go func() {
 		c.cfg.Logf("hy2: listening on %s", srv.Addr())
