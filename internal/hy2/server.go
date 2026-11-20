@@ -199,7 +199,14 @@ func loadCertificate(cfg Config) (tls.Certificate, error) {
 // 进程还活着但入口已经不再接受连接时，主控不能继续发布这个节点。正常
 // 退出（Close 触发）时进程马上结束，这个状态变更只是兜底。
 func (s *Server) Serve() error {
-	defer s.setEnabled(false)
+	// 所有退出路径都要释放监听资源：Close 是幂等的（sync.Once），正常退出
+	// 时 main 也会调它，重复调用无副作用。若只在外部 Close 时释放，Serve
+	// 因 Accept 错误提前返回后 UDP socket 会一直占着，controller 清掉引用后
+	// 更没人能关，下次 Retry 绑定同一端口必然失败。
+	defer func() {
+		_ = s.Close()
+		s.setEnabled(false)
+	}()
 
 	for {
 		conn, err := s.listener.Accept(s.ctx)

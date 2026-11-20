@@ -108,7 +108,7 @@ func main() {
 			SkipProbe:        skipHy2Probe(),
 			Dial:             app.DialOutbound,
 			Logf:             log.Printf,
-		})
+		}, platform.DetectRuntime())
 		defer hy2Ctl.Close()
 		// 无论入口最终是否起来都要注册状态提供器：主控对缺失的 hy2 字段会
 		// 保留上次结果，不注册就会让订阅一直发布一个连不上的入口。

@@ -37,42 +37,48 @@ func (noopCert) Status() cert.Report           { return cert.Report{} }
 func (noopCert) SetReporter(func(cert.Report)) {}
 func (noopCert) Close()                        {}
 
-// TestApplyNodeSignalsHy2LocalOnly 验证只有 runtime=local 才把 hy2 信号
-// 下发给控制器。
+// TestApplyNodeSignalsPassesHy2 验证主控下发的 hy2 信号会原样透传给控制器。
 //
-// 托管容器/PaaS 的 UDP 端口通常不可公网直达，节点侧也会跳过；主控不该
-// 让这类节点反复探测。
-func TestApplyNodeSignalsHy2LocalOnly(t *testing.T) {
-	cases := []struct {
-		runtime   string
-		wantCalls int
-	}{
-		{"local", 1},
-		{"railway", 0},
-		{"northflank", 0},
-		{"docker", 0},
-		{"unknown", 0},
+// runtime 门控在 controller 内部做（首次 Sync 与后续信号走同一条路径），
+// app 层不再过滤——这样非 local 节点一旦启动过入口，主控的关闭信号也一定
+// 能到达控制器。
+func TestApplyNodeSignalsPassesHy2(t *testing.T) {
+	signals := []hy2.Signal{
+		{Enabled: true, Retry: 3},
+		{Enabled: false},
+		{Enabled: true, Retry: 4},
 	}
 
-	for _, tc := range cases {
+	for _, signal := range signals {
 		ctl := &fakeHy2Controller{}
-		signal := &hy2.Signal{Enabled: true, Retry: 3}
 
 		applyNodeSignals(
-			&nodeSyncResult{Hy2: signal},
+			&nodeSyncResult{Hy2: &signal},
 			NewServer(nil, ""),
 			noopTunnel{}, noopCert{}, ctl,
-			tc.runtime,
 		)
 
-		if len(ctl.signals) != tc.wantCalls {
-			t.Errorf("runtime %q: hy2 sync calls = %d, want %d",
-				tc.runtime, len(ctl.signals), tc.wantCalls)
+		if len(ctl.signals) != 1 {
+			t.Fatalf("hy2 sync calls = %d, want 1", len(ctl.signals))
 		}
-		if tc.wantCalls == 1 && ctl.signals[0] != *signal {
-			t.Errorf("runtime %q: signal = %+v, want %+v",
-				tc.runtime, ctl.signals[0], *signal)
+		if ctl.signals[0] != signal {
+			t.Errorf("signal = %+v, want %+v", ctl.signals[0], signal)
 		}
+	}
+}
+
+// TestApplyNodeSignalsNoHy2 验证没有信号时不调用控制器。
+func TestApplyNodeSignalsNoHy2(t *testing.T) {
+	ctl := &fakeHy2Controller{}
+
+	applyNodeSignals(
+		&nodeSyncResult{},
+		NewServer(nil, ""),
+		noopTunnel{}, noopCert{}, ctl,
+	)
+
+	if len(ctl.signals) != 0 {
+		t.Fatalf("hy2 sync calls = %d, want 0", len(ctl.signals))
 	}
 }
 
@@ -83,20 +89,5 @@ func TestApplyNodeSignalsNoHy2Controller(t *testing.T) {
 		&nodeSyncResult{Hy2: &hy2.Signal{Enabled: true}},
 		NewServer(nil, ""),
 		noopTunnel{}, noopCert{}, nil,
-		"local",
 	)
-}
-
-// TestIsLocalRuntime 验证运行时判断忽略大小写与空白。
-func TestIsLocalRuntime(t *testing.T) {
-	for _, value := range []string{"local", "LOCAL", " Local ", "local\n"} {
-		if !isLocalRuntime(value) {
-			t.Errorf("isLocalRuntime(%q) = false, want true", value)
-		}
-	}
-	for _, value := range []string{"", "railway", "docker", "localhost", "local2"} {
-		if isLocalRuntime(value) {
-			t.Errorf("isLocalRuntime(%q) = true, want false", value)
-		}
-	}
 }

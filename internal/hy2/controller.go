@@ -3,6 +3,7 @@ package hy2
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -39,7 +40,8 @@ type Controller interface {
 // current 指向正在运行的 Server（未运行为 nil）；lastRetry 记住已经处理过
 // 的重试计数，重复信号直接返回。
 type controller struct {
-	cfg Config
+	cfg     Config
+	runtime string // 节点运行时，只有 local 才允许启动入口
 
 	syncMu sync.Mutex
 	// server 是当前运行的入口；nil 表示未运行。
@@ -52,6 +54,12 @@ type controller struct {
 	// 必须记住，否则每次上报（60 秒）都会重新探测一次——既产生无谓的 STUN
 	// 流量，也让“再次尝试开启”按钮失去意义。
 	attempted bool
+	// closed 是进程退出时的终止标志。
+	//
+	// 与普通关闭信号（Enabled=false）不同，Close 之后再也不允许启动：退出
+	// 期间可能还有在途的上报请求返回 Enabled=true，若没有这个标志，Sync 会
+	// 在 HTTP 关闭和会话排空期间重新拉起入口，直到 main 的 defer Close 才停。
+	closed bool
 	// lastErr 记录最近一次失败原因，便于日志排查。
 	lastErr error
 }
@@ -60,11 +68,15 @@ type controller struct {
 //
 // 与 New 不同，这里不会立即绑定端口：是否启动由主控信号决定，首次探测
 // 也推迟到第一次 Sync。cfg.Listen 必须是完整的监听地址（含固定端口）。
-func NewController(cfg Config) Controller {
+//
+// runtime 用于限制只有 local 环境才启动入口：托管容器/PaaS 的 UDP 端口
+// 通常不可公网直达，即使配了 HY2_SKIP_PROBE 强行绑定也没有意义。首次启动
+// 和后续信号共用这个判断，避免“启动了却关不掉”的不一致。
+func NewController(cfg Config, runtime string) Controller {
 	if cfg.Logf == nil {
 		cfg.Logf = log.Printf
 	}
-	return &controller{cfg: cfg}
+	return &controller{cfg: cfg, runtime: runtime}
 }
 
 // Sync 应用主控信号。
@@ -80,6 +92,18 @@ func NewController(cfg Config) Controller {
 func (c *controller) Sync(signal Signal) {
 	c.syncMu.Lock()
 	defer c.syncMu.Unlock()
+
+	// 进程已退出：忽略一切信号，包括在途上报返回的 Enabled=true。
+	if c.closed {
+		return
+	}
+
+	// 只有 local 环境允许启动入口：与主控侧的判断一致。关闭信号始终放行，
+	// 这样即使运行时被改过、或历史版本启动过入口，主控仍能把它关掉。
+	if signal.Enabled && strings.ToLower(strings.TrimSpace(c.runtime)) != "local" {
+		c.stopLocked()
+		return
+	}
 
 	// 关闭信号优先：只要不要求开启就停掉入口。不能先比较 Retry——关闭信号
 	// 的 Retry 通常是 0，与上一次处理过的值不同，会被误判成“重试”而重启。
@@ -190,5 +214,6 @@ func (c *controller) Status() Report {
 func (c *controller) Close() {
 	c.syncMu.Lock()
 	defer c.syncMu.Unlock()
+	c.closed = true
 	c.stopLocked()
 }

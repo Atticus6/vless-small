@@ -110,7 +110,7 @@ type nodeReport struct {
 	Arch    string        `json:"arch,omitempty"`
 	Tunnel  tunnel.Report `json:"tunnel"`
 	Cert    cert.Report   `json:"cert"`
-	// Hy2 是 Hysteria 2 入口状态；节点没配置该入口时省略，主控按不支持处理。
+	// Hy2 是 Hysteria 2 入口状态；节点没配置该入口时省略，主控把缺失视为未启用。
 	Hy2 *hy2.Report `json:"hy2,omitempty"`
 	// TunnelReset 只在进程启动后的首份成功上报里为 true。
 	//
@@ -249,7 +249,7 @@ func StartNodeSync(
 		log.Printf("initial device sync failed: %v", err)
 	}
 	if result != nil {
-		applyNodeSignals(result, srv, tunnelCtl, certCtl, hy2Ctl, info.runtime)
+		applyNodeSignals(result, srv, tunnelCtl, certCtl, hy2Ctl)
 		handleNodeUpdate(cfg, srv, result.Update)
 	}
 
@@ -293,7 +293,7 @@ func syncLoop(
 			continue
 		}
 
-		applyNodeSignals(result, srv, tunnelCtl, certCtl, hy2Ctl, info.runtime)
+		applyNodeSignals(result, srv, tunnelCtl, certCtl, hy2Ctl)
 		handleNodeUpdate(cfg, srv, result.Update)
 	}
 }
@@ -311,7 +311,6 @@ func applyNodeSignals(
 	tunnelCtl tunnel.Controller,
 	certCtl cert.Controller,
 	hy2Ctl hy2.Controller,
-	runtime string,
 ) {
 	if result.Tunnel != nil {
 		tunnelCtl.Sync(*result.Tunnel)
@@ -322,7 +321,10 @@ func applyNodeSignals(
 	if result.Egress != nil {
 		srv.SetEgressEnabled(result.Egress.Enabled)
 	}
-	if result.Hy2 != nil && hy2Ctl != nil && isLocalRuntime(runtime) {
+	if result.Hy2 != nil && hy2Ctl != nil {
+		// runtime 限制在 controller 内部做：首次 Sync 与后续信号走同一条
+		// 路径，且关闭信号始终能到达控制器（否则非 local 节点一旦启动过
+		// 就再也关不掉）。
 		hy2Ctl.Sync(*result.Hy2)
 	}
 }
@@ -384,7 +386,7 @@ func syncDevicesWithReset(
 		Tunnel:      tunnel,
 		TunnelReset: reset,
 		Cert:        cert,
-		// 未配置 hy2 入口时 srv.hy2Status 为 nil，字段整体省略。
+		// 未配置 hy2 入口时 srv.hy2Status 为 nil，字段省略；主控把它视为未启用。
 		Hy2:         srv.hy2Report(),
 		Listen:      listen,
 		Path:        path,

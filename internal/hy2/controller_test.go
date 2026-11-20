@@ -17,7 +17,7 @@ func newTestController(t *testing.T) Controller {
 		CertDir:      t.TempDir(),
 		SkipProbe:    true,
 		Authenticate: func(string) bool { return true },
-	})
+	}, "local")
 }
 
 // TestControllerSyncEnables 验证开启信号会真正绑定端口并把状态置为 enabled。
@@ -134,7 +134,7 @@ func TestControllerFailedProbeDoesNotAutoRetry(t *testing.T) {
 		PublicIP:     "",
 		Authenticate: func(string) bool { return true },
 		Logf:         func(string, ...any) {},
-	})
+	}, "local")
 	defer ctl.Close()
 
 	ctl.Sync(Signal{Enabled: true})
@@ -164,7 +164,7 @@ func TestControllerRetryAfterFailedProbe(t *testing.T) {
 		PublicIP:     "",
 		Authenticate: func(string) bool { return true },
 		Logf:         func(string, ...any) {},
-	})
+	}, "local")
 	defer ctl.Close()
 
 	ctl.Sync(Signal{Enabled: true, Retry: 0})
@@ -247,9 +247,68 @@ func TestControllerClose(t *testing.T) {
 	ctl.Close()
 }
 
+// TestControllerCloseIgnoresSignals 验证 Close 后忽略一切信号。
+//
+// 进程退出期间可能还有在途的上报请求返回 Enabled=true；若没有终止标志，
+// Sync 会在 HTTP 关闭和会话排空期间重新拉起入口。
+func TestControllerCloseIgnoresSignals(t *testing.T) {
+	ctl := newTestController(t)
+
+	ctl.Sync(Signal{Enabled: true})
+	ctl.Close()
+
+	// 在途上报返回的开启信号必须被忽略。
+	ctl.Sync(Signal{Enabled: true, Retry: 99})
+	if ctl.Status().Enabled {
+		t.Fatal("Sync restarted the entry after Close")
+	}
+	if ctl.(*controller).server != nil {
+		t.Fatal("Sync created a server after Close")
+	}
+}
+
+// TestControllerNonLocalRejectsEnable 验证非 local 运行时拒绝开启信号。
+func TestControllerNonLocalRejectsEnable(t *testing.T) {
+	for _, runtime := range []string{"railway", "northflank", "docker", "unknown", ""} {
+		ctl := NewController(Config{
+			Listen:       "127.0.0.1:0",
+			Password:     "secret",
+			CertDir:      t.TempDir(),
+			SkipProbe:    true,
+			Authenticate: func(string) bool { return true },
+		}, runtime)
+
+		ctl.Sync(Signal{Enabled: true})
+		if ctl.Status().Enabled {
+			t.Errorf("runtime %q: entry started, want rejected", runtime)
+		}
+		ctl.Close()
+	}
+}
+
+// TestControllerNonLocalAcceptsDisable 验证非 local 运行时的关闭信号仍能
+// 到达控制器：如果历史版本启动过入口，主控必须能把它关掉。
+func TestControllerNonLocalAcceptsDisable(t *testing.T) {
+	ctl := NewController(Config{
+		Listen:       "127.0.0.1:0",
+		Password:     "secret",
+		CertDir:      t.TempDir(),
+		SkipProbe:    true,
+		Authenticate: func(string) bool { return true },
+	}, "railway")
+	defer ctl.Close()
+
+	// 先制造一个“正在运行”的状态：直接用 local 语义的控制器启动，再切成
+	// 非 local 的控制器不合适；这里只验证关闭信号被记录，不 panic。
+	ctl.Sync(Signal{Enabled: false})
+	if ctl.Status().Enabled {
+		t.Fatal("entry enabled after disable signal")
+	}
+}
+
 // TestControllerStatusZeroValue 验证未启动时 Status 返回 disabled。
 func TestControllerStatusZeroValue(t *testing.T) {
-	ctl := NewController(Config{Listen: "127.0.0.1:0", Password: "x"})
+	ctl := NewController(Config{Listen: "127.0.0.1:0", Password: "x"}, "local")
 	defer ctl.Close()
 
 	if ctl.Status().Enabled {
