@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -332,6 +333,7 @@ func TestDialOutboundBindsSourceIPv4(t *testing.T) {
 	}()
 
 	conn, err := dialOutbound(
+		context.Background(),
 		"tcp",
 		listener.Addr().String(),
 		net.ParseIP("127.0.0.2"),

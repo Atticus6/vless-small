@@ -259,6 +259,37 @@ func TestTCPRelay(t *testing.T) {
 	}
 }
 
+// TestTCPRelayLargeMessage 覆盖单条 WS 消息远大于转发缓冲区的情况：
+// 服务端必须按块流式转发，不能假设一条消息对应一次 Read。
+func TestTCPRelayLargeMessage(t *testing.T) {
+	id := mustTestUUID(t)
+	echo := startTCPEcho(t)
+	ts := newTestWSServer(t, map[[16]byte]struct{}{id: {}}, "")
+	ws := dialTestWS(t, ts)
+
+	req := buildRequest(t, id, cmdTCP, echo, nil)
+	if err := ws.WriteMessage(websocket.BinaryMessage, req); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	_, resp, err := ws.ReadMessage()
+	if err != nil {
+		t.Fatalf("read response header: %v", err)
+	}
+	if !bytes.Equal(resp, []byte{vlessVersion, 0}) {
+		t.Fatalf("response header = %v", resp)
+	}
+
+	// 3 个缓冲区大小的数据放在一条 WS 消息里；回显会拆成多条消息返回。
+	payload := bytes.Repeat([]byte("0123456789abcdef"), 3*bufferSize/16)
+	if err := ws.WriteMessage(websocket.BinaryMessage, payload); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	got := readWSBytes(t, ws, len(payload))
+	if !bytes.Equal(got, payload) {
+		t.Fatal("large payload mismatch")
+	}
+}
+
 func TestTCPRelayChunked(t *testing.T) {
 	id := mustTestUUID(t)
 	target := startChunkedTCP(t)

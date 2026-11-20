@@ -1,11 +1,14 @@
 package app
 
 import (
+	"context"
 	"encoding/binary"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -90,23 +93,6 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// dialOutbound 建立到目标的 TCP/UDP 连接，可按需绑定 IPv4 源地址。
-//
-// 绑定源地址时使用 tcp4/udp4，确保内核不会因为目标解析出 IPv6 而绕开
-// 指定出口；普通连接保持 tcp/udp，继续支持 IPv6。
-func dialOutbound(base, target string, sourceIP net.IP) (net.Conn, error) {
-	dialer := net.Dialer{Timeout: dialTimeout}
-	if sourceIP != nil {
-		switch base {
-		case "tcp":
-			dialer.LocalAddr = &net.TCPAddr{IP: sourceIP.To4()}
-		case "udp":
-			dialer.LocalAddr = &net.UDPAddr{IP: sourceIP.To4()}
-		}
-	}
-	return dialer.Dial(dialNetwork(base, sourceIP), target)
-}
-
 // pingLoop 定期发送控制帧; WriteControl 可与数据写并发调用, 无需额外加锁.
 func pingLoop(ws *websocket.Conn, stop <-chan struct{}) {
 	ticker := time.NewTicker(pingInterval)
@@ -124,6 +110,19 @@ func pingLoop(ws *websocket.Conn, stop <-chan struct{}) {
 	}
 }
 
+// relayBufferPool 复用 TCP 转发缓冲区。
+//
+// 大流量下每条连接每秒会经历成百上千次读；复用固定大小的缓冲区可以避免
+// 每条连接各自持有一份，也给 GC 减压。
+var relayBufferPool = sync.Pool{
+	New: func() any { return make([]byte, bufferSize) },
+}
+
+// udpRelayBufferPool 复用 UDP 回包缓冲区（最大 datagram + 2 字节长度头）。
+var udpRelayBufferPool = sync.Pool{
+	New: func() any { return make([]byte, 64*1024+2) },
+}
+
 // relayTCP 双向转发: WebSocket <-> 目标 TCP. 仅本 goroutine 写 WS 数据帧.
 // sourceIP 非空时绑定该本地地址作为出站源 IP；userID 用于累计流量。
 func (s *Server) relayTCP(
@@ -133,7 +132,7 @@ func (s *Server) relayTCP(
 	sourceIP net.IP,
 	userID [16]byte,
 ) {
-	conn, err := dialOutbound("tcp", target, sourceIP)
+	conn, err := dialOutbound(context.Background(), "tcp", target, sourceIP)
 	if err != nil {
 		log.Printf("dial %s from %s: %v", target, sourceIP, err)
 		return
@@ -153,28 +152,51 @@ func (s *Server) relayTCP(
 		s.addTraffic(userID, uint64(len(early)), 0)
 	}
 
-	// WS -> 目标; 出错时关 conn, 让下面的读循环退出.
+	// WS -> 目标。用 NextReader 流式读取消息内容，并先把不足一个缓冲区的
+	// 分片合并再写目标连接：一条大消息可能被拆成多个 WS 帧（gorilla 默认
+	// 4KB 一帧），逐帧 Write 会把一次 32KB 写放大成八次系统调用。用池化
+	// 缓冲区合并后，既保留“不为每条消息分配新内存”的优点，又不会牺牲
+	// 大块写的吞吐。
 	go func() {
 		defer conn.Close()
+		buf := relayBufferPool.Get().([]byte)
+		defer relayBufferPool.Put(buf)
+
 		for {
-			_, data, err := ws.ReadMessage()
+			_, reader, err := ws.NextReader()
 			if err != nil {
 				return
 			}
-			_ = ws.SetReadDeadline(time.Now().Add(readTimeout))
-			if len(data) == 0 {
-				continue
+
+			filled := 0
+			for {
+				n, readErr := reader.Read(buf[filled:])
+				filled += n
+				if filled == len(buf) {
+					if !writeUpstream(conn, buf[:filled], s, userID) {
+						return
+					}
+					filled = 0
+				}
+				// io.EOF 表示当前消息读完，继续处理下一条；其他错误
+				// （连接中断、超时、协议错误）直接结束会话。
+				if readErr != nil {
+					if readErr == io.EOF {
+						break
+					}
+					return
+				}
 			}
-			_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-			if _, err := conn.Write(data); err != nil {
+			if filled > 0 && !writeUpstream(conn, buf[:filled], s, userID) {
 				return
 			}
-			s.addTraffic(userID, uint64(len(data)), 0)
+			_ = ws.SetReadDeadline(time.Now().Add(readTimeout))
 		}
 	}()
 
 	// 目标 -> WS.
-	buf := make([]byte, bufferSize)
+	buf := relayBufferPool.Get().([]byte)
+	defer relayBufferPool.Put(buf)
 	for {
 		n, err := conn.Read(buf)
 		if n > 0 {
@@ -189,6 +211,17 @@ func (s *Server) relayTCP(
 	}
 }
 
+// writeUpstream 把一段上行数据写入目标连接并累计流量.
+// 返回 false 表示写入失败，调用方应结束会话。
+func writeUpstream(conn net.Conn, data []byte, s *Server, userID [16]byte) bool {
+	_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	written, err := conn.Write(data)
+	if written > 0 {
+		s.addTraffic(userID, uint64(written), 0)
+	}
+	return err == nil
+}
+
 // relayUDP 转发 VLESS UDP 会话.
 // 包格式: [2B 大端长度][payload], 一个 WS 消息里可以拼接多个包.
 // sourceIP 非空时绑定该本地地址作为出站源 IP；userID 用于累计流量。
@@ -199,7 +232,7 @@ func (s *Server) relayUDP(
 	sourceIP net.IP,
 	userID [16]byte,
 ) {
-	conn, err := dialOutbound("udp", target, sourceIP)
+	conn, err := dialOutbound(context.Background(), "udp", target, sourceIP)
 	if err != nil {
 		log.Printf("dial udp %s from %s: %v", target, sourceIP, err)
 		return
@@ -241,7 +274,9 @@ func (s *Server) relayUDP(
 	}()
 
 	// 回包: 每个 datagram 前加 2 字节长度, 再作为一条 WS 消息发出.
-	buf := make([]byte, 64*1024+2)
+	// 缓冲区从池里取：DNS/QUIC 场景下 UDP 会话建立频繁，避免每次分配 64KB。
+	buf := udpRelayBufferPool.Get().([]byte)
+	defer udpRelayBufferPool.Put(buf)
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(udpIdleTimeout))
 		n, err := conn.Read(buf[2:])
